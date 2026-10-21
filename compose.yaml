@@ -84,16 +84,10 @@ services:
 
   # Pulse: checks every part of this stack and streams the status over SSE
   # (GET /pulse/v1/health/stream on the edge). Targets: compose/pulse/targets.yaml.
-  # Built from a pinned commit of synthwerk-pulse: its CI pushes the GHCR image only
-  # on main. Switch to ghcr.io/velimirmueller/synthwerk-pulse@sha256:... after the merge.
+  # Image from synthwerk-pulse main 06b20b4 (sha-06b20b4f7f08), pinned by digest.
   pulse:
     <<: *hardening
-    build:
-      context: https://github.com/VelimirMueller/synthwerk-pulse.git#c69e069c75154ea8c1e3cbd25c5b5793daf959ac
-      args:
-        VERSION: 0.1.0
-        COMMIT: c69e069c75154ea8c1e3cbd25c5b5793daf959ac
-    image: synthwerk-pulse:local
+    image: ghcr.io/velimirmueller/synthwerk-pulse:sha-06b20b4f7f0895d4c0eac6613a8a2263b196ba31@sha256:2f49a6ff8d4f1a7492286c7c76729d6b47716702b38d758ef46a1ee3c5e65bcd
     read_only: true
     cap_drop: [ALL]
     environment:
