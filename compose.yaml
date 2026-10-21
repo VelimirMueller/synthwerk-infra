@@ -88,10 +88,10 @@ services:
   pulse:
     <<: *hardening
     build:
-      context: https://github.com/VelimirMueller/synthwerk-pulse.git#21398cd07d1f8b0af7ab0f8c544922ed0fc921a7
+      context: https://github.com/VelimirMueller/synthwerk-pulse.git#c69e069c75154ea8c1e3cbd25c5b5793daf959ac
       args:
         VERSION: 0.1.0
-        COMMIT: 21398cd07d1f8b0af7ab0f8c544922ed0fc921a7
+        COMMIT: c69e069c75154ea8c1e3cbd25c5b5793daf959ac
     image: synthwerk-pulse:local
     read_only: true
     cap_drop: [ALL]
