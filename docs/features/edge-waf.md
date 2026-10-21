@@ -39,6 +39,8 @@ updated: 2026-10-21
 | CRS paranoia level | 1 (`SYNTHWERK_WAF_PARANOIA_LEVEL`, 1 to 4) |
 | Response inspection | off |
 | WAF log fields | status, rule IDs, method, path. No query, no body. |
+| Edge access log | no `RequestPath` (holds the query), no client IP, no headers |
+| Edge spans | query values redacted (`REDACTED`); keep `tracing.safeQueryParams` unset |
 
 ## Events
 
@@ -58,7 +60,7 @@ updated: 2026-10-21
 ## Tests
 
 - `tests/waf/waf_test.go` — `Check - known attack - returns 403`, `Check - benign request - returns 200`
-- `tests/stack/stack_test.sh` — `edge - SQL injection, path traversal, XSS - 403`, `edge - burst - 429`, `edge - WAF down - 500`
+- `tests/stack/stack_test.sh` — `edge - SQL injection, path traversal, XSS - 403`, `edge - burst - 429`, `edge - WAF down - 500`, `logs - canary query value - absent`
 
 ## Changes
 

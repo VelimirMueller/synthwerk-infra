@@ -27,12 +27,22 @@ log:
   level: INFO
   format: json
 
+# No personal data in the access log: RequestPath holds the query string,
+# Client* hold the client IP. Headers are dropped as well.
 accessLog:
   format: json
   fields:
+    names:
+      RequestPath: drop
+      ClientAddr: drop
+      ClientHost: drop
+      ClientPort: drop
+      ClientUsername: drop
     headers:
       defaultMode: drop
 
+# Spans keep query keys but redact every value ("REDACTED"): do not set
+# tracing.safeQueryParams. Client IPs in spans are truncated in the collector later (design §8).
 tracing:
   serviceName: synthwerk-edge
   otlp:

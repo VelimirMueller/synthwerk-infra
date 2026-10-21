@@ -46,6 +46,16 @@ head -c 1100000 /dev/zero | tr '\0' 'a' >"$big"
 expect_status "body over 1 MiB gets 413" 413 --data-binary "@$big" "$EDGE/stub/upload"
 expect_status "unknown route gets 404" 404 "$EDGE/unknown"
 
+echo "# no query string or client IP in the edge and WAF logs"
+canary="canary$RANDOM$RANDOM"
+expect_status "benign request with a canary query" 200 "$EDGE/stub/?token=$canary"
+expect_status "attack with a canary query" 403 "$EDGE/stub/?token=$canary&id=1%27%20OR%20%271%27=%271"
+sleep 1
+logs=$(docker compose logs --no-color edge waf 2>&1)
+if grep -q "$canary" <<<"$logs"; then fail "a query value is in the logs"; else pass "no query value in the logs"; fi
+if grep -qE '"Client(Addr|Host)"' <<<"$logs"; then fail "the access log has the client IP"; else pass "no client IP in the access log"; fi
+if grep -q '"RouterName":"stub@file"' <<<"$logs"; then pass "access log is written"; else fail "no access log line for the stub router"; fi
+
 echo "# the edge fails closed when the WAF is down"
 docker compose stop waf >/dev/null 2>&1
 expect_status "request without WAF gets 500" 500 "$EDGE/stub/"
