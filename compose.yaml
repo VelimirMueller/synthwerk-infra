@@ -1,4 +1,4 @@
-# Synthwerk local stack: edge, WAF, bus, database, telemetry.
+# Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -81,15 +81,40 @@ services:
       <<: *healthcheck
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
 
-  # SLOT pulse (VelimirMueller/synthwerk#26): the pulse PR adds its service here
-  # and enables the "pulse" route in compose/traefik/dynamic/routes.yml.
-  # pulse:
-  #   <<: *hardening
-  #   image: ghcr.io/velimirmueller/synthwerk-pulse:<tag>@sha256:<digest>
-  #   environment: { <<: *service-env, OTEL_SERVICE_NAME: synthwerk-pulse }
-  #   networks: [app, data]
-  #   depends_on: { bus: { condition: service_healthy }, database: { condition: service_healthy } }
-  #   healthcheck: { <<: *healthcheck, test: ["CMD", "/pulse", "healthcheck"] }
+  # Pulse: checks every part of this stack and streams the status over SSE
+  # (GET /pulse/v1/health/stream on the edge). Targets: compose/pulse/targets.yaml.
+  # Built from a pinned commit of synthwerk-pulse: its CI pushes the GHCR image only
+  # on main. Switch to ghcr.io/velimirmueller/synthwerk-pulse@sha256:... after the merge.
+  pulse:
+    <<: *hardening
+    build:
+      context: https://github.com/VelimirMueller/synthwerk-pulse.git#21398cd07d1f8b0af7ab0f8c544922ed0fc921a7
+      args:
+        VERSION: 0.1.0
+        COMMIT: 21398cd07d1f8b0af7ab0f8c544922ed0fc921a7
+    image: synthwerk-pulse:local
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-pulse
+      # The Go kit (synthwerk-contracts go/v0.1.0) exports OTLP over gRPC only.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      SYNTHWERK_PULSE_DATABASE_URL: postgres://${SYNTHWERK_POSTGRES_USER:-synthwerk}:${SYNTHWERK_POSTGRES_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
+      SYNTHWERK_PULSE_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
+      SYNTHWERK_PULSE_TARGETS_FILE: /etc/pulse/targets.yaml
+    volumes:
+      - ./compose/pulse/targets.yaml:/etc/pulse/targets.yaml:ro
+    networks: [app, data]
+    depends_on:
+      bus:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/pulse", "healthcheck"]
 
   # Bus: NATS with JetStream.
   bus:

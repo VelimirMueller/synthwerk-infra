@@ -1,0 +1,36 @@
+# Targets pulse checks in the local stack (SYNTHWERK_PULSE_TARGETS_FILE).
+# Format: synthwerk-pulse targets.example.yaml and docs/features/live-status.md.
+#
+#   name      ^[a-z][a-z0-9-]{0,63}$, the target of the status event
+#   kind      http: GET url; a /readyz body gives the status, any other 2xx/3xx is ok
+#             tcp:  open a TCP connection to address (host:port)
+#   interval  default SYNTHWERK_PULSE_DEFAULT_INTERVAL (15s), 1s to 5m
+#   timeout   default SYNTHWERK_PULSE_DEFAULT_TIMEOUT (3s), at most the interval and 10s
+#
+# Infra parts poll every 5 s: two failed checks in a row turn a target down,
+# so a stopped part shows as down in about 10 to 15 s.
+targets:
+  - name: edge
+    kind: http
+    url: http://edge:8082/ping
+    interval: 5s
+  - name: waf
+    kind: http
+    url: http://waf:8080/healthz
+    interval: 5s
+  - name: bus
+    kind: http
+    url: http://bus:8222/healthz?js-enabled-only=true
+    interval: 5s
+  - name: database
+    kind: tcp
+    address: database:5432
+    interval: 5s
+  - name: telemetry
+    kind: http
+    url: http://telemetry:3000/api/health
+    interval: 5s
+  - name: stub
+    kind: http
+    url: http://stub:8080/
+    interval: 5s

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stack test: the running compose stack is healthy and the edge WAF works.
+# Stack test: the running compose stack is healthy, the edge WAF works and pulse
+# streams the status of each service.
 # Needs a running stack: scripts/init-env.sh && docker compose up --wait
 #
 # Usage: tests/stack/stack_test.sh   (exit 0 = all checks pass)
@@ -8,6 +9,14 @@ cd "$(dirname "$0")/../.."
 
 EDGE="http://127.0.0.1:${SYNTHWERK_EDGE_HTTP_PORT:-8080}"
 failures=0
+big=""
+stream_log=""
+stream_pid=""
+cleanup() {
+  [[ -n "$stream_pid" ]] && kill "$stream_pid" 2>/dev/null
+  rm -f "$big" "$stream_log"
+}
+trap cleanup EXIT
 
 pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
@@ -43,7 +52,6 @@ expect_status "SQL injection in form body" 403 --data "user=admin' OR 1=1--&pass
 
 echo "# limits"
 big=$(mktemp)
-trap 'rm -f "$big"' EXIT
 head -c 1100000 /dev/zero | tr '\0' 'a' >"$big"
 expect_status "body over 1 MiB gets 413" 413 --data-binary "@$big" "$EDGE/stub/upload"
 expect_status "unknown route gets 404" 404 "$EDGE/unknown"
@@ -60,6 +68,41 @@ sleep 1
 if docker compose logs --no-color edge 2>&1 | grep -q secret123; then fail "secret123 is in the edge logs"; else pass "secret123 is not in the edge logs"; fi
 if grep -qE '"Client(Addr|Host)"' <<<"$logs"; then fail "the access log has the client IP"; else pass "no client IP in the access log"; fi
 if grep -q '"RouterName":"stub@file"' <<<"$logs"; then pass "access log is written"; else fail "no access log line for the stub router"; fi
+
+echo "# pulse streams the status of each service (synthwerk#26)"
+# wait_for <pattern> <seconds>: true when the stream log holds the pattern in time.
+wait_for() {
+  local pattern=$1 limit=$2 start=$SECONDS
+  while ((SECONDS - start < limit)); do
+    grep -q -- "$pattern" "$stream_log" && return 0
+    sleep 1
+  done
+  return 1
+}
+stream_log=$(mktemp)
+curl -sN --max-time 180 "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/null &
+stream_pid=$!
+if wait_for '^event: snapshot' 10; then pass "stream starts with a snapshot"; else fail "no snapshot on the pulse stream"; fi
+for svc in edge waf bus database telemetry stub; do
+  if grep -q "\"target\":\"$svc\",\"status\":\"ok\"" "$stream_log"; then pass "snapshot: $svc ok"; else fail "snapshot: $svc not ok"; fi
+done
+docker compose stop stub >/dev/null 2>&1
+start=$SECONDS
+if wait_for '"target":"stub","from":"ok","status":"down"' 30; then
+  pass "stopped stub is down on the stream after $((SECONDS - start)) s (limit 30 s)"
+else
+  fail "stopped stub is not down on the stream within 30 s"
+fi
+docker compose start stub >/dev/null 2>&1
+start=$SECONDS
+if wait_for '"target":"stub","from":"down","status":"ok"' 60; then
+  pass "started stub is ok on the stream after $((SECONDS - start)) s"
+else
+  fail "started stub is not ok on the stream within 60 s"
+fi
+kill "$stream_pid" 2>/dev/null || true
+stream_pid=""
+docker compose up --wait stub >/dev/null 2>&1
 
 echo "# the edge fails closed when the WAF is down"
 docker compose stop waf >/dev/null 2>&1
