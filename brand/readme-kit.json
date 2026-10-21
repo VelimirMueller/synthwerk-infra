@@ -1,0 +1,457 @@
+{
+  "group": "flagship",
+  "version": "v2",
+  "dividers": [
+    {
+      "key": "what",
+      "index": "01",
+      "title": "WHAT IT DOES",
+      "caption": "FIVE BOXES. ONE COMMAND.",
+      "art": "strip-flagship-1"
+    },
+    {
+      "key": "start",
+      "index": "02",
+      "title": "QUICK START",
+      "caption": "INIT. UP. TEST.",
+      "art": "strip-flagship-2"
+    },
+    {
+      "key": "how",
+      "index": "03",
+      "title": "HOW IT WORKS",
+      "caption": "EVERY REQUEST PASSES THE WAF.",
+      "art": "strip-flagship-3"
+    },
+    {
+      "key": "usage",
+      "index": "04",
+      "title": "USAGE",
+      "caption": "PORTS, NAMES, KNOBS.",
+      "art": "strip-flagship-4"
+    },
+    {
+      "key": "status",
+      "index": "05",
+      "title": "STATUS",
+      "caption": "DRAFT. GREEN WHEN HEALTHY.",
+      "art": "strip-flagship-5"
+    }
+  ],
+  "panels": [
+    {
+      "key": "lead",
+      "type": "lead",
+      "title": "ABOUT",
+      "text": "**synthwerk-infra** starts the Synthwerk spine on one machine: edge, WAF, bus, database and telemetry. `docker compose up --wait` returns when every health check is green. Pulse joins in the next PR."
+    },
+    {
+      "key": "stats",
+      "type": "stats",
+      "title": "THE NUMBERS",
+      "items": [
+        {
+          "value": "6",
+          "label": "SERVICES, ALL HEALTH-CHECKED"
+        },
+        {
+          "value": "403",
+          "label": "FOR A KNOWN ATTACK"
+        },
+        {
+          "value": "0",
+          "label": "SECRETS IN THE REPO"
+        },
+        {
+          "value": "8",
+          "label": "IMAGES PINNED BY DIGEST"
+        }
+      ]
+    },
+    {
+      "key": "features",
+      "type": "cards",
+      "title": "THE SPINE, LOCALLY",
+      "items": [
+        {
+          "title": "EDGE",
+          "text": "Traefik v3 with a rate limit, a 1 MiB body limit and the Coraza WAF with OWASP CRS v4."
+        },
+        {
+          "title": "BUS AND DATABASE",
+          "text": "NATS JetStream and PostgreSQL 18 on an internal network. No host ports."
+        },
+        {
+          "title": "TELEMETRY",
+          "text": "grafana/otel-lgtm takes OTLP on 4317 and 4318. Grafana on localhost:3000."
+        }
+      ]
+    },
+    {
+      "key": "what",
+      "type": "notes",
+      "title": "WHAT IT DOES",
+      "columns": 2,
+      "items": [
+        {
+          "lead": "One command",
+          "text": "`docker compose up --wait` starts edge, WAF, bus, database, telemetry and a stub backend."
+        },
+        {
+          "lead": "Health checks",
+          "text": "Every container has one. CI fails when one service is not healthy in 300 s."
+        },
+        {
+          "lead": "WAF test",
+          "text": "SQL injection, path traversal and XSS through the edge get 403. A benign request gets 200."
+        },
+        {
+          "lead": "No secrets",
+          "text": "`scripts/init-env.sh` writes `.env` with random dev passwords. `.env` is git-ignored."
+        }
+      ]
+    },
+    {
+      "key": "start",
+      "type": "terminal",
+      "title": "QUICK START",
+      "lines": [
+        "$ scripts/init-env.sh",
+        "$ docker compose up --wait",
+        "$ tests/stack/stack_test.sh",
+        "# Grafana: http://localhost:3000",
+        "$ docker compose down --volumes"
+      ]
+    },
+    {
+      "key": "setup",
+      "type": "commands",
+      "title": "WHAT EACH STEP DOES",
+      "rows": [
+        {
+          "cmd": "scripts/init-env.sh",
+          "text": "Copy `.env.example` to `.env`. Fill each empty password with a random value."
+        },
+        {
+          "cmd": "docker compose up --wait",
+          "text": "Build the WAF, start the stack, return when all services are healthy."
+        },
+        {
+          "cmd": "tests/stack/stack_test.sh",
+          "text": "Check health, WAF blocks, limits and fail-closed behaviour."
+        },
+        {
+          "cmd": "docker compose --profile ollama up --wait",
+          "text": "Also start Ollama for local models. Off by default."
+        }
+      ]
+    },
+    {
+      "key": "startnotes",
+      "type": "notes",
+      "columns": 2,
+      "items": [
+        {
+          "lead": "Needs",
+          "text": "Docker with Compose v2 or later, `openssl` and `curl`. Go 1.27 only to work on the WAF."
+        },
+        {
+          "lead": "First start",
+          "text": "Builds the WAF image and pulls about 2 GB of images. Later starts take about 30 s."
+        }
+      ]
+    },
+    {
+      "key": "flow",
+      "type": "flow",
+      "title": "ONE REQUEST, LEFT TO RIGHT",
+      "nodes": [
+        {
+          "title": "CLIENT",
+          "sub": "127.0.0.1:8080"
+        },
+        {
+          "title": "EDGE",
+          "sub": "rate + body limit"
+        },
+        {
+          "title": "WAF",
+          "sub": "Coraza + CRS v4",
+          "hot": true
+        },
+        {
+          "title": "SERVICE",
+          "sub": "stub, then pulse"
+        }
+      ],
+      "caption": "Traefik asks the WAF first. 200 passes the request on. 403 goes back to the client."
+    },
+    {
+      "key": "how",
+      "type": "notes",
+      "title": "READ THE ANSWER",
+      "items": [
+        {
+          "lead": "403",
+          "text": "A CRS rule blocked the request. The WAF logs the rule IDs and the path, never the query or body."
+        },
+        {
+          "lead": "413 and 429",
+          "text": "Body over 1 MiB, or more than 50 requests per second from one IP (burst 100)."
+        },
+        {
+          "lead": "500",
+          "text": "The WAF did not answer. The edge fails closed and lets nothing through."
+        }
+      ]
+    },
+    {
+      "key": "services",
+      "type": "commands",
+      "title": "THE SERVICES",
+      "rows": [
+        {
+          "cmd": "edge",
+          "text": "Traefik v3.7.16. Routes in `compose/traefik/dynamic/`. Host port 8080."
+        },
+        {
+          "cmd": "waf",
+          "text": "Coraza v3.8.1 + CRS v4.25 as forwardAuth. Built from `waf/`. See ADR-0001."
+        },
+        {
+          "cmd": "bus",
+          "text": "NATS 2.15.1 with JetStream. Network `data` only."
+        },
+        {
+          "cmd": "database",
+          "text": "PostgreSQL 18.6. Network `data` only."
+        },
+        {
+          "cmd": "telemetry",
+          "text": "grafana/otel-lgtm 0.36.0. Ports 3000, 4317, 4318 on 127.0.0.1."
+        },
+        {
+          "cmd": "stub",
+          "text": "nginx answers 200 at `/stub`. The WAF test target until pulse exists."
+        }
+      ]
+    },
+    {
+      "key": "config",
+      "type": "commands",
+      "title": "CONFIGURATION",
+      "rows": [
+        {
+          "cmd": "SYNTHWERK_<SERVICE>_<NAME>",
+          "text": "Every setting is an env var with this shape (D-40). See `.env.example`."
+        },
+        {
+          "cmd": "SYNTHWERK_WAF_ENGINE",
+          "text": "`On` blocks. `DetectionOnly` logs matches without blocking."
+        },
+        {
+          "cmd": "SYNTHWERK_WAF_PARANOIA_LEVEL",
+          "text": "CRS paranoia level, 1 to 4. Default 1."
+        }
+      ]
+    },
+    {
+      "key": "reference",
+      "type": "notes",
+      "columns": 2,
+      "items": [
+        {
+          "lead": "Decisions",
+          "text": "Why Coraza runs as its own service: `docs/adr/0001-coraza-as-forwardauth-service.md`."
+        },
+        {
+          "lead": "Feature docs",
+          "text": "Local stack and edge WAF: `docs/features/`."
+        }
+      ]
+    },
+    {
+      "key": "status",
+      "type": "status",
+      "title": "WHAT WORKS TODAY",
+      "rows": [
+        {
+          "label": "Local compose stack",
+          "value": "beta",
+          "state": "wip"
+        },
+        {
+          "label": "Edge WAF and rate limit",
+          "value": "beta",
+          "state": "wip"
+        },
+        {
+          "label": "Pulse service",
+          "value": "next PR",
+          "state": "planned"
+        },
+        {
+          "label": "Ollama profile",
+          "value": "opt-in",
+          "state": "wip"
+        },
+        {
+          "label": "OpenTofu and deploy",
+          "value": "none yet",
+          "state": "planned"
+        }
+      ]
+    },
+    {
+      "key": "now",
+      "type": "notes",
+      "columns": 3,
+      "items": [
+        {
+          "lead": "Now",
+          "text": "Draft, milestone M1."
+        },
+        {
+          "lead": "Works",
+          "text": "Stack, WAF, health checks in CI."
+        },
+        {
+          "lead": "Next",
+          "text": "Pulse, then deploy targets."
+        }
+      ]
+    },
+    {
+      "key": "checks",
+      "type": "commands",
+      "title": "CHECKS",
+      "rows": [
+        {
+          "cmd": "go test -race ./...",
+          "text": "WAF unit tests: attacks get 403, benign requests get 200."
+        },
+        {
+          "cmd": "golangci-lint run",
+          "text": "Lint with the blueprint config."
+        },
+        {
+          "cmd": "tests/stack/stack_test.sh",
+          "text": "Stack test against the running compose stack."
+        },
+        {
+          "cmd": "shellcheck scripts/*.sh tests/stack/*.sh",
+          "text": "Lint the shell scripts."
+        }
+      ]
+    },
+    {
+      "key": "links",
+      "type": "buttons",
+      "items": [
+        {
+          "label": "Compose file",
+          "sub": "compose.yaml",
+          "href": "compose.yaml"
+        },
+        {
+          "label": "Settings",
+          "sub": ".env.example",
+          "href": ".env.example"
+        },
+        {
+          "label": "Stack test",
+          "sub": "tests/stack/",
+          "href": "tests/stack/stack_test.sh"
+        },
+        {
+          "label": "WAF decision",
+          "sub": "docs/adr/0001",
+          "href": "docs/adr/0001-coraza-as-forwardauth-service.md"
+        },
+        {
+          "label": "Feature docs",
+          "sub": "docs/features/",
+          "href": "docs/features/"
+        },
+        {
+          "label": "License",
+          "sub": "MIT",
+          "href": "LICENSE"
+        },
+        {
+          "label": "Plain text",
+          "sub": "show copyable commands"
+        }
+      ]
+    },
+    {
+      "key": "footer",
+      "type": "footer",
+      "studio": "VM. studio / flagship",
+      "text": "open source · look per vm-brand playbook · MIT (c) 2026 Velimir Mueller",
+      "eof": "-- EOF -- nothing gets in without a 200 --"
+    }
+  ],
+  "readme": {
+    "hero_alt": "SYNTHWERK-INFRA. One command starts the spine. Every box turns green or CI says no. Draft, M1.",
+    "items": [
+      "lead",
+      "stats",
+      "divider:what",
+      "features",
+      "what",
+      "divider:start",
+      "start",
+      "setup",
+      "startnotes",
+      {
+        "details": "links",
+        "chip": 7,
+        "code": [
+          [
+            "bash",
+            "scripts/init-env.sh                          # write .env with random dev passwords\ndocker compose up --wait                     # start, wait for every health check\ntests/stack/stack_test.sh                    # health, WAF, limits, fail closed\ndocker compose --profile ollama up --wait    # optional: local models\ndocker compose down --volumes                # stop and delete the data"
+          ]
+        ]
+      },
+      {
+        "buttons": "links",
+        "only": [
+          1,
+          2,
+          3
+        ]
+      },
+      "divider:how",
+      "flow",
+      "how",
+      "divider:usage",
+      "services",
+      "config",
+      "reference",
+      {
+        "buttons": "links",
+        "only": [
+          4,
+          5,
+          6
+        ]
+      },
+      "divider:status",
+      "status",
+      "now",
+      "checks",
+      {
+        "details": "links",
+        "chip": 7,
+        "code": [
+          [
+            "bash",
+            "go test -race ./...                          # WAF unit tests\ngolangci-lint run                            # lint\ntests/stack/stack_test.sh                    # stack test (stack must run)\nshellcheck scripts/*.sh tests/stack/*.sh     # shell lint"
+          ]
+        ]
+      },
+      "footer"
+    ]
+  }
+}
