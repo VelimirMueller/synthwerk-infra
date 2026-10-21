@@ -11,6 +11,7 @@ fi
 
 umask 077
 while IFS= read -r line || [[ -n "$line" ]]; do
+  line=${line%$'\r'}
   if [[ "$line" =~ ^(SYNTHWERK_[A-Z0-9_]*_PASSWORD)=$ ]]; then
     printf '%s=%s\n' "${BASH_REMATCH[1]}" "$(openssl rand -hex 24)"
   else

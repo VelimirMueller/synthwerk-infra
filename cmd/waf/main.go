@@ -67,7 +67,11 @@ func run(addr string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() {
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			errc <- err
+		}
+	}()
 	log.Info("waf listening", "addr", addr, "engine", cfg.Engine, "paranoia_level", cfg.ParanoiaLevel)
 
 	select {
@@ -77,10 +81,7 @@ func run(addr string, log *slog.Logger) error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+	return srv.Shutdown(shutdownCtx)
 }
 
 func healthcheck(addr string) error {

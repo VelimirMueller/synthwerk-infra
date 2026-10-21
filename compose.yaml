@@ -128,6 +128,7 @@ services:
     healthcheck:
       <<: *healthcheck
       start_period: 90s
+      retries: 40
       # run-all.sh writes /tmp/ready when the collector and all backends answer.
       test: ["CMD", "test", "-f", "/tmp/ready"]
 

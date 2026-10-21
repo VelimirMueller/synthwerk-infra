@@ -34,7 +34,7 @@ updated: 2026-10-21
 
 | Rule | Value |
 |---|---|
-| Rate limit | 50 req/s average, burst 100, per client IP |
+| Rate limit | 50 req/s average, burst 100, per client IP. Traefik must see the client IP: a proxy in front needs `sourceCriterion`. |
 | Request body | 1 MiB |
 | CRS paranoia level | 1 (`SYNTHWERK_WAF_PARANOIA_LEVEL`, 1 to 4) |
 | Response inspection | off |

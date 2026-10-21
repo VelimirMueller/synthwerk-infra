@@ -149,9 +149,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	it := tx.ProcessRequestHeaders()
-	if it == nil && r.Body != nil {
+	if it == nil {
+		// Phase 2 runs for every request, also without a body.
+		body := r.Body
+		if body == nil {
+			body = http.NoBody
+		}
 		var err error
-		if it, _, err = tx.ReadRequestBodyFrom(r.Body); err != nil {
+		if it, _, err = tx.ReadRequestBodyFrom(body); err != nil {
 			h.log.Error("read body", "err", err)
 			http.Error(w, "waf error", http.StatusInternalServerError)
 			return
