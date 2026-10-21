@@ -22,7 +22,7 @@ updated: 2026-10-21
 - Starts Traefik v3 (edge), Coraza (WAF), NATS JetStream (bus), PostgreSQL 18 (database) and grafana/otel-lgtm (telemetry).
 - Starts a stub backend at `/stub` so the edge has a target.
 - Starts synthwerk-pulse. It checks the parts in `compose/pulse/targets.yaml` every 5 s.
-- Builds pulse from a pinned commit of `synthwerk-pulse` (git build context). The GHCR image replaces it after the pulse PR merges.
+- Runs pulse from its GHCR image, pinned by digest (`ghcr.io/velimirmueller/synthwerk-pulse`).
 - Routes `/pulse` through the chain `edge-secure-stream`. It has no `buffering` middleware, because buffering holds an SSE response back.
 - Pins every image by tag and digest.
 - Keeps the bus and the database on an internal network without published ports.

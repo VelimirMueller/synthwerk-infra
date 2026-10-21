@@ -83,8 +83,9 @@ stream_log=$(mktemp)
 curl -sN --max-time 180 "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/null &
 stream_pid=$!
 if wait_for '^event: snapshot' 10; then pass "stream starts with a snapshot"; else fail "no snapshot on the pulse stream"; fi
+# The snapshot data line can land after the event line: wait for each target.
 for svc in edge waf bus database telemetry stub; do
-  if grep -q "\"target\":\"$svc\",\"status\":\"ok\"" "$stream_log"; then pass "snapshot: $svc ok"; else fail "snapshot: $svc not ok"; fi
+  if wait_for "\"target\":\"$svc\",\"status\":\"ok\"" 10; then pass "snapshot: $svc ok"; else fail "snapshot: $svc not ok"; fi
 done
 docker compose stop stub >/dev/null 2>&1
 start=$SECONDS
@@ -93,7 +94,8 @@ if wait_for '"target":"stub","from":"ok","status":"down"' 30; then
 else
   fail "stopped stub is not down on the stream within 30 s"
 fi
-docker compose start stub >/dev/null 2>&1
+# Wait for the container itself first, so the window measures pulse, not container start.
+docker compose up --wait stub >/dev/null 2>&1
 start=$SECONDS
 if wait_for '"target":"stub","from":"down","status":"ok"' 60; then
   pass "started stub is ok on the stream after $((SECONDS - start)) s"
@@ -102,7 +104,6 @@ else
 fi
 kill "$stream_pid" 2>/dev/null || true
 stream_pid=""
-docker compose up --wait stub >/dev/null 2>&1
 
 echo "# the edge fails closed when the WAF is down"
 docker compose stop waf >/dev/null 2>&1
