@@ -28,11 +28,24 @@
 - Traefik calls `http://waf:8080/check` for every request. 200 lets the request pass; 403 blocks it.
 - Coraza v3.8.1 with `coraza-coreruleset` v4.25.0 (CRS v4 embedded). Paranoia level 1 (`SYNTHWERK_WAF_PARANOIA_LEVEL`).
 
+## Body size limit
+
+- `forwardAuth` sends the body with `forwardBody: true` and `maxBodySize: 1048576` (1 MiB).
+- The `buffering` middleware runs first with the same 1 MiB limit. A larger body gets **413 and is blocked**.
+- If a body ever reaches `forwardAuth` above `maxBodySize`, Traefik answers 401. That also blocks.
+- The WAF itself uses `SecRequestBodyLimit` 1 MiB with `SecRequestBodyLimitAction Reject` (413).
+- No path lets a body pass without inspection.
+
 ## Consequences
 
 - The WAF fails closed: when `waf` does not answer, Traefik returns 500.
-- Request bodies up to 1 MiB are inspected. The `buffering` middleware returns 413 above that.
 - Response inspection is off. That was the plan for SSE routes anyway (R-F2).
 - The WAF logs rule IDs, method and path. It does not log the query or the body.
-- Revisit when Traefik ships a working Coraza integration for `amd64`.
 - Security impact: low. Same rule set, one more internal hop on the `app` network (no egress).
+
+## What would bring the plugin back
+
+- A Coraza http-wasm release that starts with the pinned Traefik on `linux/amd64` and `linux/arm64`.
+- Or a fix in Traefik for jcchavezs/coraza-http-wasm-traefik#23 (`fatal error: fault`, `unsafe.Slice: len out of range` at start since Traefik 3.4.3).
+- Proof: `tests/stack/stack_test.sh` passes in CI (`amd64`) with the plugin in place of `waf`.
+- Then drop the extra hop and the `waf` service. The CRS version and the paranoia level stay the same.
