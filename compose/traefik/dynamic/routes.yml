@@ -1,0 +1,33 @@
+# Routes. Each service is reached under /<service> on the edge, prefix stripped.
+http:
+  routers:
+    stub:
+      rule: PathPrefix(`/stub`)
+      entryPoints: [web]
+      middlewares: [edge-secure, strip-service-prefix]
+      service: stub
+
+    # SLOT pulse (VelimirMueller/synthwerk#26): enable with the "pulse" service in compose.yaml.
+    # pulse:
+    #   rule: PathPrefix(`/pulse`)
+    #   entryPoints: [web]
+    #   middlewares: [edge-secure, strip-service-prefix]
+    #   service: pulse
+
+  middlewares:
+    strip-service-prefix:
+      stripPrefixRegex:
+        regex: ["^/[a-z0-9-]+"]
+
+  services:
+    # Stub backend for the WAF test until real services exist.
+    stub:
+      loadBalancer:
+        servers:
+          - url: http://stub:8080
+
+    # SLOT pulse (VelimirMueller/synthwerk#26)
+    # pulse:
+    #   loadBalancer:
+    #     servers:
+    #       - url: http://pulse:8080

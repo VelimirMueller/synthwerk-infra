@@ -1,0 +1,12 @@
+{
+  "group": "flagship",
+  "tagline": "One command starts the spine. Every box turns green or CI says no.",
+  "sublabel": "TRAEFIK · CORAZA · NATS · POSTGRES · OTEL",
+  "bannerVersion": "v2",
+  "art": {
+    "file": "v2/flagship-base.png",
+    "seed": 302
+  },
+  "status": "DRAFT · M1",
+  "readme": "v3"
+}

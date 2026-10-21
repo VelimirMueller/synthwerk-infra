@@ -1,0 +1,59 @@
+# Traefik static configuration for the local stack.
+# Routes and middlewares are in dynamic/ (file provider, no Docker socket).
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":8000"
+    http:
+      # Drop headers whose names alias another header (X_Auth_User for X-Auth-User).
+      aliasHeadersStrategy: delete
+  ping:
+    address: ":8082"
+    http:
+      aliasHeadersStrategy: delete
+
+ping:
+  entryPoint: ping
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+log:
+  level: INFO
+  format: json
+
+# No personal data in the access log: RequestPath holds the query string,
+# Client* hold the client IP. Headers are dropped as well.
+accessLog:
+  format: json
+  fields:
+    names:
+      RequestPath: drop
+      ClientAddr: drop
+      ClientHost: drop
+      ClientPort: drop
+      ClientUsername: drop
+    headers:
+      defaultMode: drop
+
+# Traefik v3.7 writes url.full and url.query with every query value replaced by
+# "REDACTED", except for the names listed in safeQueryParams. The list stays empty
+# so no query value reaches a span. Client IPs in spans are truncated in the
+# collector later (design §8).
+tracing:
+  serviceName: synthwerk-edge
+  safeQueryParams: []
+  otlp:
+    http:
+      endpoint: http://telemetry:4318/v1/traces
+
+metrics:
+  otlp:
+    serviceName: synthwerk-edge
+    http:
+      endpoint: http://telemetry:4318/v1/metrics

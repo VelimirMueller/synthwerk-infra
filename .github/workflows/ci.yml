@@ -1,0 +1,75 @@
+# Thin caller of the synthwerk blueprint for the Go WAF, plus the stack job:
+# start the compose stack, wait for every health check, run the edge tests.
+# Required checks for the ruleset: "ci / required" (blueprint jobs) and "gate" (all jobs).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  # Blueprint: gofmt, golangci-lint, go test -race, go build (waf/, cmd/waf, tests/waf).
+  ci:
+    permissions:
+      contents: read
+    uses: VelimirMueller/synthwerk-blueprint/.github/workflows/go-ci.yml@v1
+
+  # Local: the whole stack on one runner. Every service must turn healthy.
+  stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh tests/stack/*.sh
+      - name: Write .env with generated dev passwords
+        run: scripts/init-env.sh
+      - name: Validate compose (default and ollama profile)
+        run: |
+          docker compose config --quiet
+          docker compose --profile ollama config --quiet
+      - name: Start the stack and wait for every health check
+        run: docker compose up --build --wait --wait-timeout 300
+      - name: Stack status
+        if: always()
+        run: docker compose ps --all
+      - name: Stack test (health, WAF, limits, fail closed)
+        run: tests/stack/stack_test.sh
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes
+
+  # One check over the blueprint and the local jobs ("ci / required" covers the blueprint only).
+  gate:
+    if: always()
+    needs: [ci, stack]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: All jobs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            [[ "$result" == "success" ]] || exit 1
+          done

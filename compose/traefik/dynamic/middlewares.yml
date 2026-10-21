@@ -1,0 +1,35 @@
+# Edge middlewares. Every public router uses the chain "edge-secure".
+http:
+  middlewares:
+    edge-secure:
+      chain:
+        middlewares: [edge-ratelimit, edge-body-limit, edge-waf, edge-headers]
+
+    # Per client IP: 50 requests per second on average, bursts up to 100.
+    edge-ratelimit:
+      rateLimit:
+        average: 50
+        period: 1s
+        burst: 100
+
+    # Requests larger than 1 MiB get 413 before the WAF reads them.
+    edge-body-limit:
+      buffering:
+        maxRequestBodyBytes: 1048576
+
+    # Coraza + OWASP CRS v4 (service "waf"). A block returns 403.
+    # The WAF fails closed: if it does not answer, Traefik returns 500.
+    edge-waf:
+      forwardAuth:
+        address: http://waf:8080/check
+        trustForwardHeader: false
+        preserveRequestMethod: true
+        forwardBody: true
+        maxBodySize: 1048576
+        maxResponseBodySize: 4096
+
+    edge-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
