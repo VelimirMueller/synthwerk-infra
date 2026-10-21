@@ -53,6 +53,9 @@ expect_status "attack with a canary query" 403 "$EDGE/stub/?token=$canary&id=1%2
 sleep 1
 logs=$(docker compose logs --no-color edge waf 2>&1)
 if grep -q "$canary" <<<"$logs"; then fail "a query value is in the logs"; else pass "no query value in the logs"; fi
+expect_status "request with ?token=secret123" 200 "$EDGE/stub/?token=secret123"
+sleep 1
+if docker compose logs --no-color edge 2>&1 | grep -q secret123; then fail "secret123 is in the edge logs"; else pass "secret123 is not in the edge logs"; fi
 if grep -qE '"Client(Addr|Host)"' <<<"$logs"; then fail "the access log has the client IP"; else pass "no client IP in the access log"; fi
 if grep -q '"RouterName":"stub@file"' <<<"$logs"; then pass "access log is written"; else fail "no access log line for the stub router"; fi
 
