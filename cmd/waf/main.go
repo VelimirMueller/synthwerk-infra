@@ -20,7 +20,10 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service.name", "synthwerk-waf")
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		"service.name", "synthwerk-waf",
+		"deployment.environment.name", os.Getenv("SYNTHWERK_PLATFORM_ENV"),
+	)
 	addr := os.Getenv("SYNTHWERK_WAF_ADDR")
 	if addr == "" {
 		addr = ":8080"

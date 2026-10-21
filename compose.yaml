@@ -11,6 +11,12 @@ x-hardening: &hardening
   security_opt: ["no-new-privileges:true"]
   restart: unless-stopped
 
+# Env block for every Synthwerk service (#71 conventions). Add OTEL_SERVICE_NAME per service.
+x-service-env: &service-env
+  SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+
 x-healthcheck: &healthcheck
   interval: 5s
   timeout: 3s
@@ -52,6 +58,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-waf
       SYNTHWERK_WAF_ENGINE: ${SYNTHWERK_WAF_ENGINE:-On}
       SYNTHWERK_WAF_PARANOIA_LEVEL: ${SYNTHWERK_WAF_PARANOIA_LEVEL:-1}
     networks: [app]
@@ -78,6 +86,7 @@ services:
   # pulse:
   #   <<: *hardening
   #   image: ghcr.io/velimirmueller/synthwerk-pulse:<tag>@sha256:<digest>
+  #   environment: { <<: *service-env, OTEL_SERVICE_NAME: synthwerk-pulse }
   #   networks: [app, data]
   #   depends_on: { bus: { condition: service_healthy }, database: { condition: service_healthy } }
   #   healthcheck: { <<: *healthcheck, test: ["CMD", "/pulse", "healthcheck"] }

@@ -41,6 +41,7 @@ updated: 2026-10-21
 | Bus and database ports on the host | none |
 | Networks | `edge` (published), `app` and `data` (internal), `models` (Ollama egress) |
 | Health check timeout in CI | 300 s |
+| Service env | `SYNTHWERK_PLATFORM_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` (anchor `x-service-env`) |
 
 ## Events
 
