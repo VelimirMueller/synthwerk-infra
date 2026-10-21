@@ -101,7 +101,7 @@ docker compose down --volumes                # stop and delete the data
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/how-v2-light.svg">
-  <img alt="403: A CRS rule blocked the request. The WAF logs the rule IDs and the path, never the query or body. 413 and 429: Body over 1 MiB, or more than 50 requests per second from one IP (burst 100). 500: The WAF did not answer. The edge fails closed and lets nothing through" src="assets/readme/how-v2-dark.svg" width="100%">
+  <img alt="403: A CRS rule blocked the request. Edge and WAF logs hold no query values, no body and no client IP. 413 and 429: Body over 1 MiB, or more than 50 requests per second from one IP (burst 100). 500: The WAF did not answer. The edge fails closed and lets nothing through" src="assets/readme/how-v2-dark.svg" width="100%">
 </picture>
 </p>
 
@@ -121,7 +121,7 @@ docker compose down --volumes                # stop and delete the data
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/config-v2-light.svg">
-  <img alt="SYNTHWERK_&lt;SERVICE&gt;_&lt;NAME&gt;: Every setting is an env var with this shape (D-40). See .env.example. SYNTHWERK_WAF_ENGINE: On blocks. DetectionOnly logs matches without blocking. SYNTHWERK_WAF_PARANOIA_LEVEL: CRS paranoia level, 1 to 4. Default 1" src="assets/readme/config-v2-dark.svg" width="100%">
+  <img alt="SYNTHWERK_&lt;SERVICE&gt;_&lt;NAME&gt;: Every setting is an env var with this shape (D-40). See .env.example. SYNTHWERK_PLATFORM_ENV, OTEL_*: Environment name (local here). Services get the standard OTEL_* names from compose. SYNTHWERK_WAF_ENGINE: On blocks. DetectionOnly logs matches without blocking. SYNTHWERK_WAF_PARANOIA_LEVEL: CRS paranoia level, 1 to 4. Default 1" src="assets/readme/config-v2-dark.svg" width="100%">
 </picture>
 </p>
 

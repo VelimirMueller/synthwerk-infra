@@ -193,7 +193,7 @@
       "items": [
         {
           "lead": "403",
-          "text": "A CRS rule blocked the request. The WAF logs the rule IDs and the path, never the query or body."
+          "text": "A CRS rule blocked the request. Edge and WAF logs hold no query values, no body and no client IP."
         },
         {
           "lead": "413 and 429",
@@ -244,6 +244,10 @@
         {
           "cmd": "SYNTHWERK_<SERVICE>_<NAME>",
           "text": "Every setting is an env var with this shape (D-40). See `.env.example`."
+        },
+        {
+          "cmd": "SYNTHWERK_PLATFORM_ENV, OTEL_*",
+          "text": "Environment name (`local` here). Services get the standard `OTEL_*` names from compose."
         },
         {
           "cmd": "SYNTHWERK_WAF_ENGINE",
