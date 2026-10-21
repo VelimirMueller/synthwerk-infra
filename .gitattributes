@@ -1,0 +1,2 @@
+# Generated SVGs embed base64 art. Review them as binary, not text.
+assets/**/*.svg binary
