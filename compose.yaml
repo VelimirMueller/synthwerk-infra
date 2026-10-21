@@ -14,8 +14,9 @@ x-hardening: &hardening
 # Env block for every Synthwerk service (#71 conventions). Add OTEL_SERVICE_NAME per service.
 x-service-env: &service-env
   SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
-  OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4318
-  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  # OTLP over gRPC: the Go kit (synthwerk-contracts) and the blueprint conventions use it.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
 
 x-healthcheck: &healthcheck
   interval: 5s
@@ -98,9 +99,6 @@ services:
     environment:
       <<: *service-env
       OTEL_SERVICE_NAME: synthwerk-pulse
-      # The Go kit (synthwerk-contracts go/v0.1.0) exports OTLP over gRPC only.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4317
-      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       SYNTHWERK_PULSE_DATABASE_URL: postgres://${SYNTHWERK_POSTGRES_USER:-synthwerk}:${SYNTHWERK_POSTGRES_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
       SYNTHWERK_PULSE_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
       SYNTHWERK_PULSE_TARGETS_FILE: /etc/pulse/targets.yaml

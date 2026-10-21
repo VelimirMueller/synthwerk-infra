@@ -47,7 +47,7 @@ updated: 2026-10-21
 | Networks | `edge` (published), `app` and `data` (internal), `models` (Ollama egress) |
 | Health check timeout in CI | 300 s |
 | Service env | `SYNTHWERK_PLATFORM_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` (anchor `x-service-env`) |
-| Pulse OTLP | gRPC on `telemetry:4317`. The Go kit exports gRPC only, so pulse overrides the anchor. |
+| Service OTLP | gRPC on `telemetry:4317` (anchor `x-service-env`). The edge sends OTLP HTTP on 4318 from `traefik.yml`. |
 | Pulse check interval | 5 s per target. Down after 2 failed checks, up after 3 good checks. |
 
 ## Events
