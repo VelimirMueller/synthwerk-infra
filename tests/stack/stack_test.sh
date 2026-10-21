@@ -21,6 +21,8 @@ expect_status() {
 }
 
 echo "# every default service is running and healthy"
+# "config --services" lists only the services of the active profiles (none by default,
+# or COMPOSE_PROFILES), so a profile service such as ollama is expected only when enabled.
 expected=$(docker compose config --services | sort)
 for svc in $expected; do
   state=$(docker compose ps --format '{{.Health}}' "$svc" 2>/dev/null || true)
