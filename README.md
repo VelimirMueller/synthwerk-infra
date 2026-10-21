@@ -8,21 +8,21 @@
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/lead-v2-light.svg">
-  <img alt="synthwerk-infra starts the Synthwerk spine on one machine: edge, WAF, bus, database and telemetry. docker compose up --wait returns when every health check is green. Pulse joins in the next PR." src="assets/readme/lead-v2-dark.svg" width="100%">
+  <img alt="synthwerk-infra starts the Synthwerk spine on one machine: edge, WAF, bus, database, telemetry and pulse. docker compose up --wait returns when every health check is green. Pulse streams the status of each part." src="assets/readme/lead-v2-dark.svg" width="100%">
 </picture>
 </p>
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/stats-v2-light.svg">
-  <img alt="6 SERVICES, ALL HEALTH-CHECKED. 403 FOR A KNOWN ATTACK. 0 SECRETS IN THE REPO. 8 IMAGES PINNED BY DIGEST" src="assets/readme/stats-v2-dark.svg" width="100%">
+  <img alt="7 SERVICES, ALL HEALTH-CHECKED. 403 FOR A KNOWN ATTACK. 0 SECRETS IN THE REPO. 8 IMAGES PINNED BY DIGEST" src="assets/readme/stats-v2-dark.svg" width="100%">
 </picture>
 </p>
 
 <br>
 
 <p>
-<img alt="01 WHAT IT DOES. FIVE BOXES. ONE COMMAND." src="assets/readme/divider-what-v2.svg" width="100%">
+<img alt="01 WHAT IT DOES. SIX BOXES. ONE COMMAND." src="assets/readme/divider-what-v2.svg" width="100%">
 </p>
 
 <p>
@@ -114,7 +114,7 @@ docker compose down --volumes                # stop and delete the data
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/services-v2-light.svg">
-  <img alt="edge: Traefik v3.7.16. Routes in compose/traefik/dynamic/. Host port 8080. waf: Coraza v3.8.1 + CRS v4.25 as forwardAuth. Built from waf/. See ADR-0001. bus: NATS 2.15.1 with JetStream. Network data only. database: PostgreSQL 18.6. Network data only. telemetry: grafana/otel-lgtm 0.36.0. Ports 3000, 4317, 4318 on 127.0.0.1. stub: nginx answers 200 at /stub. The WAF test target until pulse exists" src="assets/readme/services-v2-dark.svg" width="100%">
+  <img alt="edge: Traefik v3.7.16. Routes in compose/traefik/dynamic/. Host port 8080. waf: Coraza v3.8.1 + CRS v4.25 as forwardAuth. Built from waf/. See ADR-0001. bus: NATS 2.15.1 with JetStream. Network data only. database: PostgreSQL 18.6. Network data only. telemetry: grafana/otel-lgtm 0.36.0. Ports 3000, 4317, 4318 on 127.0.0.1. stub: nginx answers 200 at /stub. The WAF test target. pulse: synthwerk-pulse 0.1.0. Checks every part, streams the status at /pulse/v1/health/stream" src="assets/readme/services-v2-dark.svg" width="100%">
 </picture>
 </p>
 
@@ -147,21 +147,21 @@ docker compose down --volumes                # stop and delete the data
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/status-v2-light.svg">
-  <img alt="Local compose stack: beta. Edge WAF and rate limit: beta. Pulse service: next PR. Ollama profile: opt-in. OpenTofu and deploy: none yet" src="assets/readme/status-v2-dark.svg" width="100%">
+  <img alt="Local compose stack: beta. Edge WAF and rate limit: beta. Pulse service: beta. Ollama profile: opt-in. OpenTofu and deploy: none yet" src="assets/readme/status-v2-dark.svg" width="100%">
 </picture>
 </p>
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/now-v2-light.svg">
-  <img alt="Now: Draft, milestone M1. Works: Stack, WAF, health checks in CI. Next: Pulse, then deploy targets" src="assets/readme/now-v2-dark.svg" width="100%">
+  <img alt="Now: Draft, milestone M1. Works: Stack, WAF, pulse stream, health checks in CI. Next: Deploy targets" src="assets/readme/now-v2-dark.svg" width="100%">
 </picture>
 </p>
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/readme/checks-v2-light.svg">
-  <img alt="go test -race ./...: WAF unit tests: attacks get 403, benign requests get 200. golangci-lint run: Lint with the blueprint config. tests/stack/stack_test.sh: Stack test against the running compose stack. shellcheck scripts/*.sh tests/stack/*.sh: Lint the shell scripts" src="assets/readme/checks-v2-dark.svg" width="100%">
+  <img alt="go test -race ./...: WAF unit tests: attacks get 403, benign requests get 200. golangci-lint run: Lint with the blueprint config. tests/stack/stack_test.sh: Stack test: health, WAF, limits, pulse down and up. shellcheck scripts/*.sh tests/stack/*.sh: Lint the shell scripts" src="assets/readme/checks-v2-dark.svg" width="100%">
 </picture>
 </p>
 

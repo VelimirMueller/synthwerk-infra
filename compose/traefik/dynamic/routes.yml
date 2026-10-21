@@ -7,12 +7,14 @@ http:
       middlewares: [edge-secure, strip-service-prefix]
       service: stub
 
-    # SLOT pulse (VelimirMueller/synthwerk#26): enable with the "pulse" service in compose.yaml.
-    # pulse:
-    #   rule: PathPrefix(`/pulse`)
-    #   entryPoints: [web]
-    #   middlewares: [edge-secure, strip-service-prefix]
-    #   service: pulse
+    # Pulse serves GET only, and /v1/health/stream is a long-lived SSE response.
+    # The chain has no "buffering" middleware: it would hold the stream back. The WAF
+    # still limits a request body to 1 MiB (forwardAuth maxBodySize).
+    pulse:
+      rule: PathPrefix(`/pulse`)
+      entryPoints: [web]
+      middlewares: [edge-secure-stream, strip-service-prefix]
+      service: pulse
 
   middlewares:
     strip-service-prefix:
@@ -26,8 +28,7 @@ http:
         servers:
           - url: http://stub:8080
 
-    # SLOT pulse (VelimirMueller/synthwerk#26)
-    # pulse:
-    #   loadBalancer:
-    #     servers:
-    #       - url: http://pulse:8080
+    pulse:
+      loadBalancer:
+        servers:
+          - url: http://pulse:8080

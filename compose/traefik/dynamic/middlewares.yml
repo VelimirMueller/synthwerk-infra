@@ -5,6 +5,12 @@ http:
       chain:
         middlewares: [edge-ratelimit, edge-body-limit, edge-waf, edge-headers]
 
+    # Same chain without edge-body-limit, for streaming responses (SSE).
+    # The buffering middleware holds a response until it ends.
+    edge-secure-stream:
+      chain:
+        middlewares: [edge-ratelimit, edge-waf, edge-headers]
+
     # Per client IP: 50 requests per second on average, bursts up to 100.
     edge-ratelimit:
       rateLimit:

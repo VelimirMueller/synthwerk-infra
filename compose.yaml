@@ -1,4 +1,4 @@
-# Synthwerk local stack: edge, WAF, bus, database, telemetry.
+# Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -14,8 +14,9 @@ x-hardening: &hardening
 # Env block for every Synthwerk service (#71 conventions). Add OTEL_SERVICE_NAME per service.
 x-service-env: &service-env
   SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
-  OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4318
-  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  # OTLP over gRPC: the Go kit (synthwerk-contracts) and the blueprint conventions use it.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://telemetry:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
 
 x-healthcheck: &healthcheck
   interval: 5s
@@ -81,15 +82,31 @@ services:
       <<: *healthcheck
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
 
-  # SLOT pulse (VelimirMueller/synthwerk#26): the pulse PR adds its service here
-  # and enables the "pulse" route in compose/traefik/dynamic/routes.yml.
-  # pulse:
-  #   <<: *hardening
-  #   image: ghcr.io/velimirmueller/synthwerk-pulse:<tag>@sha256:<digest>
-  #   environment: { <<: *service-env, OTEL_SERVICE_NAME: synthwerk-pulse }
-  #   networks: [app, data]
-  #   depends_on: { bus: { condition: service_healthy }, database: { condition: service_healthy } }
-  #   healthcheck: { <<: *healthcheck, test: ["CMD", "/pulse", "healthcheck"] }
+  # Pulse: checks every part of this stack and streams the status over SSE
+  # (GET /pulse/v1/health/stream on the edge). Targets: compose/pulse/targets.yaml.
+  # Image from synthwerk-pulse main 06b20b4 (sha-06b20b4f7f08), pinned by digest.
+  pulse:
+    <<: *hardening
+    image: ghcr.io/velimirmueller/synthwerk-pulse:sha-06b20b4f7f0895d4c0eac6613a8a2263b196ba31@sha256:2f49a6ff8d4f1a7492286c7c76729d6b47716702b38d758ef46a1ee3c5e65bcd
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-pulse
+      SYNTHWERK_PULSE_DATABASE_URL: postgres://${SYNTHWERK_POSTGRES_USER:-synthwerk}:${SYNTHWERK_POSTGRES_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
+      SYNTHWERK_PULSE_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
+      SYNTHWERK_PULSE_TARGETS_FILE: /etc/pulse/targets.yaml
+    volumes:
+      - ./compose/pulse/targets.yaml:/etc/pulse/targets.yaml:ro
+    networks: [app, data]
+    depends_on:
+      bus:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/pulse", "healthcheck"]
 
   # Bus: NATS with JetStream.
   bus:

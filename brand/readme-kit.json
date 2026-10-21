@@ -6,7 +6,7 @@
       "key": "what",
       "index": "01",
       "title": "WHAT IT DOES",
-      "caption": "FIVE BOXES. ONE COMMAND.",
+      "caption": "SIX BOXES. ONE COMMAND.",
       "art": "strip-flagship-1"
     },
     {
@@ -43,7 +43,7 @@
       "key": "lead",
       "type": "lead",
       "title": "ABOUT",
-      "text": "**synthwerk-infra** starts the Synthwerk spine on one machine: edge, WAF, bus, database and telemetry. `docker compose up --wait` returns when every health check is green. Pulse joins in the next PR."
+      "text": "**synthwerk-infra** starts the Synthwerk spine on one machine: edge, WAF, bus, database, telemetry and pulse. `docker compose up --wait` returns when every health check is green. Pulse streams the status of each part."
     },
     {
       "key": "stats",
@@ -51,7 +51,7 @@
       "title": "THE NUMBERS",
       "items": [
         {
-          "value": "6",
+          "value": "7",
           "label": "SERVICES, ALL HEALTH-CHECKED"
         },
         {
@@ -181,7 +181,7 @@
         },
         {
           "title": "SERVICE",
-          "sub": "stub, then pulse"
+          "sub": "stub, pulse"
         }
       ],
       "caption": "Traefik asks the WAF first. 200 passes the request on. 403 goes back to the client."
@@ -232,7 +232,11 @@
         },
         {
           "cmd": "stub",
-          "text": "nginx answers 200 at `/stub`. The WAF test target until pulse exists."
+          "text": "nginx answers 200 at `/stub`. The WAF test target."
+        },
+        {
+          "cmd": "pulse",
+          "text": "synthwerk-pulse 0.1.0. Checks every part, streams the status at `/pulse/v1/health/stream`."
         }
       ]
     },
@@ -291,8 +295,8 @@
         },
         {
           "label": "Pulse service",
-          "value": "next PR",
-          "state": "planned"
+          "value": "beta",
+          "state": "wip"
         },
         {
           "label": "Ollama profile",
@@ -317,11 +321,11 @@
         },
         {
           "lead": "Works",
-          "text": "Stack, WAF, health checks in CI."
+          "text": "Stack, WAF, pulse stream, health checks in CI."
         },
         {
           "lead": "Next",
-          "text": "Pulse, then deploy targets."
+          "text": "Deploy targets."
         }
       ]
     },
@@ -340,7 +344,7 @@
         },
         {
           "cmd": "tests/stack/stack_test.sh",
-          "text": "Stack test against the running compose stack."
+          "text": "Stack test: health, WAF, limits, pulse down and up."
         },
         {
           "cmd": "shellcheck scripts/*.sh tests/stack/*.sh",
