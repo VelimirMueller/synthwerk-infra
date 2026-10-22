@@ -1,0 +1,85 @@
+# Gatus on synthwerk-watch: outside checks, public page status.velimir-mueller.de.
+# Secrets come from .env (see .env.example); Gatus expands ${VAR} at start.
+storage:
+  type: sqlite
+  path: /data/data.db
+
+ui:
+  title: Synthwerk status
+  header: Synthwerk status
+
+alerting:
+  ntfy:
+    url: https://ntfy.sh
+    topic: "${NTFY_TOPIC}"
+    priority: 4
+    default-alert:
+      failure-threshold: 3
+      success-threshold: 2
+      send-on-resolved: true
+
+# The page is public: hide hosts, URLs and raw errors so the dev host IP never shows.
+endpoints:
+  - name: ssh
+    group: synthwerk-dev
+    url: tcp://${DEV_HOST_IP}:22   # from .env: the IP stays out of this public repo
+    interval: 1m
+    ui: { hide-hostname: true, hide-url: true, hide-port: true, hide-errors: true, hide-conditions: true }
+    conditions:
+      - "[CONNECTED] == true"
+      - "[RESPONSE_TIME] < 1000"
+    alerts:
+      - type: ntfy
+
+  - name: www.velimir-mueller.de
+    group: web
+    url: https://www.velimir-mueller.de
+    interval: 5m
+    ui: { hide-hostname: true, hide-url: true }
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == any(200, 429)"   # Vercel bot challenge answers 429 to non-browsers
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+    alerts:
+      - type: ntfy
+
+  - name: ops.velimir-mueller.de
+    group: web
+    url: https://ops.velimir-mueller.de
+    interval: 5m
+    ui: { hide-hostname: true, hide-url: true }
+    conditions:
+      - "[CONNECTED] == true"   # status is 0 without a connection
+      - "[STATUS] < 400"        # Cloudflare Access may answer with a redirect to its login
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+    alerts:
+      - type: ntfy
+
+  - name: status.velimir-mueller.de
+    group: web
+    url: https://status.velimir-mueller.de/health
+    interval: 5m
+    ui: { hide-hostname: true, hide-url: true }
+    conditions:
+      - "[STATUS] == 200"
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+    alerts:
+      - type: ntfy   # Gatus sends to ntfy.sh directly, not through Caddy
+
+# Pushed by watch/heartbeat/synthwerk-heartbeat.sh on the dev host every 5 min.
+external-endpoints:
+  - name: host
+    group: synthwerk-dev
+    token: "${HB_TOKEN_HOST}"
+    heartbeat:
+      interval: 15m
+    alerts:
+      - type: ntfy
+
+  - name: vision
+    group: synthwerk-dev
+    token: "${HB_TOKEN_VISION}"
+    heartbeat:
+      interval: 15m
+    alerts:
+      - type: ntfy

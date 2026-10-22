@@ -1,0 +1,43 @@
+# Outside watcher on synthwerk-watch (IONOS VPS, 1 vCPU, 854 MB RAM): Gatus behind Caddy.
+# Lives in /opt/gatus on the box. Docs: docs/features/outside-watcher.md.
+name: gatus
+services:
+  gatus:
+    image: ghcr.io/twin/gatus:v5.37.0@sha256:094eb186e55235db367e90e9d56140e5897b7044c41de23cde4cc18e6da1242e
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # SSH tunnel access; the public way in is caddy
+    env_file: .env
+    volumes:
+      - ./config:/config:ro
+      - gatus-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+
+  caddy:
+    image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    cpus: 0.5
+    depends_on: [gatus]
+
+volumes:
+  gatus-data:
+  caddy-data:
+  caddy-config:
