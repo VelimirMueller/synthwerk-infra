@@ -1,5 +1,6 @@
-# Thin caller of the synthwerk blueprint for the Go WAF, plus the stack job:
-# start the compose stack, wait for every health check, run the edge tests.
+# Thin caller of the synthwerk blueprint for the Go WAF, plus the shell job
+# (bash -n, shellcheck) and the stack job: start the compose stack, wait for every
+# health check, run the edge tests.
 # Required checks for the ruleset: "ci / required" (blueprint jobs) and "gate" (all jobs).
 name: ci
 
@@ -35,8 +36,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Lint shell scripts
-        run: shellcheck scripts/*.sh tests/stack/*.sh
       - name: Write .env with generated dev passwords
         run: scripts/init-env.sh
       - name: Validate compose (default and ollama profile)
@@ -57,10 +56,25 @@ jobs:
         if: always()
         run: docker compose down --volumes
 
+  # Local: syntax check and shellcheck on every tracked shell script.
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: bash -n (syntax)
+        run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+      - name: shellcheck (severity warning)
+        run: git ls-files -z '*.sh' | xargs -0 -r shellcheck --severity=warning
+
   # One check over the blueprint and the local jobs ("ci / required" covers the blueprint only).
   gate:
     if: always()
-    needs: [ci, stack]
+    needs: [ci, shell, stack]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
