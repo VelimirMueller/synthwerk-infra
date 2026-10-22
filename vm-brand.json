@@ -4,8 +4,8 @@
   "sublabel": "TRAEFIK · CORAZA · NATS · POSTGRES · OTEL",
   "bannerVersion": "v2",
   "art": {
-    "file": "v2/flagship-base.png",
-    "seed": 302
+    "file": "v2/synthwerk-infra.png",
+    "seed": 324
   },
   "status": "DRAFT · M1",
   "readme": "v3"
