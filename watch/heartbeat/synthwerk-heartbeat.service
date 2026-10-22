@@ -1,0 +1,25 @@
+[Unit]
+Description=Push host and vision health to the Gatus watcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Read by systemd (root) before it switches to the dynamic user, so mode 600 root:root works.
+EnvironmentFile=/etc/synthwerk/heartbeat.env
+ExecStart=/usr/local/bin/synthwerk-heartbeat
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
