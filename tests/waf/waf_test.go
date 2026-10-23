@@ -22,7 +22,12 @@ var (
 func blockingHandler(t *testing.T) *waf.Handler {
 	t.Helper()
 	handlerOnce.Do(func() {
-		cfg, err := waf.ConfigFromEnv(func(string) string { return "" })
+		cfg, err := waf.ConfigFromEnv(func(k string) string {
+			if k == "SYNTHWERK_WAF_GRPC_HOSTS" {
+				return grpcHost
+			}
+			return ""
+		})
 		if err != nil {
 			handlerErr = err
 			return
@@ -34,6 +39,12 @@ func blockingHandler(t *testing.T) *waf.Handler {
 	}
 	return handler
 }
+
+// grpcHost may send gRPC; forwardAuth sends every other request for "localhost".
+const grpcHost = "auth.localhost"
+
+// grpcFrame is one gRPC message frame: flag 0, length 2, protobuf field 1 = 1.
+const grpcFrame = "\x00\x00\x00\x00\x02\x08\x01"
 
 // forwardAuth builds the request that Traefik sends to the WAF.
 func forwardAuth(method, uri, body string, header map[string]string) *http.Request {
@@ -61,6 +72,21 @@ func TestCheck_KnownAttack_Returns403(t *testing.T) {
 			map[string]string{"Content-Type": "application/x-www-form-urlencoded"}),
 		"command injection in json body": forwardAuth(http.MethodPost, "/stub/run", `{"cmd":"; cat /etc/passwd"}`,
 			map[string]string{"Content-Type": "application/json"}),
+		"content type not on the list": forwardAuth(http.MethodPost, "/stub/upload", "data",
+			map[string]string{"Content-Type": "application/x-unknown"}),
+		"sql injection in a grpc-web query": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz?id=1%27%20OR%20%271%27=%271", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc-web+proto", "X-Forwarded-Host": grpcHost + ":8080"}),
+		// Without the gRPC host, the gRPC content type is not on the list and the body is read.
+		"grpc content type on another host": forwardAuth(http.MethodPost, "/llm/v1/chat", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc"}),
+		"command injection as grpc on another host": forwardAuth(http.MethodPost, "/llm/v1/chat", `{"cmd":"; cat /etc/passwd"}`,
+			map[string]string{"Content-Type": "application/grpc"}),
+		"command injection as grpc-web-text on the gRPC host": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", "user=admin%27%20OR%201=1--",
+			map[string]string{"Content-Type": "application/grpc-web-text", "X-Forwarded-Host": grpcHost}),
+		"grpc to the login UI path on the gRPC host": forwardAuth(http.MethodPost, "/ui/v2/login/login", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": grpcHost}),
+		"gRPC host with a lookalike name": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": "auth.localhost.evil.example"}),
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -80,6 +106,13 @@ func TestCheck_BenignRequest_Returns200(t *testing.T) {
 		"query text": forwardAuth(http.MethodGet, "/stub/search?q=red+synthesizer&page=2", "", nil),
 		"json body": forwardAuth(http.MethodPost, "/stub/notes", `{"title":"Hello","text":"A short note about filters."}`,
 			map[string]string{"Content-Type": "application/json"}),
+		// Zitadel API and console on the edge (gRPC, gRPC-web, Connect).
+		"grpc-web proto": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc-web+proto", "X-Grpc-Web": "1", "X-Forwarded-Host": grpcHost + ":8080"}),
+		"grpc": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": grpcHost}),
+		"connect proto": forwardAuth(http.MethodPost, "/zitadel.settings.v2.SettingsService/GetGeneralSettings", "\x08\x01",
+			map[string]string{"Content-Type": "application/proto", "X-Forwarded-Host": grpcHost}),
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -89,6 +122,43 @@ func TestCheck_BenignRequest_Returns200(t *testing.T) {
 				t.Fatalf("status = %d, want 200", w.Code)
 			}
 		})
+	}
+}
+
+func TestCheck_TwoContentTypes_Returns400(t *testing.T) {
+	h := blockingHandler(t)
+	r := forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", `{"cmd":"; cat /etc/passwd"}`,
+		map[string]string{"X-Forwarded-Host": grpcHost})
+	r.Header.Add("Content-Type", "application/grpc")
+	r.Header.Add("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestConfigFromEnv_GRPCHosts(t *testing.T) {
+	cfg, err := waf.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_WAF_GRPC_HOSTS" {
+			return " Auth.localhost , synthwerkauth.velimir-mueller.de,"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"auth.localhost", "synthwerkauth.velimir-mueller.de"}
+	if strings.Join(cfg.GRPCHosts, " ") != strings.Join(want, " ") {
+		t.Fatalf("GRPCHosts = %v, want %v", cfg.GRPCHosts, want)
+	}
+	if _, err := waf.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_WAF_GRPC_HOSTS" {
+			return "auth.localhost:8080"
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("host with a port: want error")
 	}
 }
 
@@ -150,6 +220,15 @@ func TestConfigFromEnv_InvalidValue_ReturnsError(t *testing.T) {
 				t.Fatalf("%s=%q: want error", name, value)
 			}
 		})
+	}
+}
+
+func TestDirectives_SetsContentTypesBeforeCRS(t *testing.T) {
+	d := waf.Directives(waf.Config{Engine: "On", ParanoiaLevel: 1, BodyLimitBytes: 1024, GRPCHosts: []string{grpcHost}})
+	ct := strings.Index(d, "tx.allowed_request_content_type=")
+	crs := strings.Index(d, "Include @owasp_crs/")
+	if ct < 0 || crs < 0 || ct > crs {
+		t.Fatalf("content types must be set before the CRS rules:\n%s", d)
 	}
 }
 

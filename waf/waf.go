@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,9 @@ type Config struct {
 	ParanoiaLevel int
 	// BodyLimitBytes is the largest request body the WAF reads.
 	BodyLimitBytes int
+	// GRPCHosts are the host names (without port) that may send gRPC, gRPC-web
+	// and Connect requests. Empty: no host may.
+	GRPCHosts []string
 }
 
 // Defaults: block, CRS paranoia level 1, 1 MiB body (same as the edge buffer).
@@ -52,8 +56,20 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	if cfg.BodyLimitBytes, err = intFromEnv(getenv, "SYNTHWERK_WAF_BODY_LIMIT_BYTES", cfg.BodyLimitBytes, 1, 64<<20); err != nil {
 		return Config{}, err
 	}
+	for h := range strings.SplitSeq(getenv("SYNTHWERK_WAF_GRPC_HOSTS"), ",") {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if !hostName.MatchString(h) {
+			return Config{}, fmt.Errorf("SYNTHWERK_WAF_GRPC_HOSTS: %q is not a host name", h)
+		}
+		cfg.GRPCHosts = append(cfg.GRPCHosts, h)
+	}
 	return cfg, nil
 }
+
+var hostName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
 func intFromEnv(getenv func(string) string, name string, def, lo, hi int) (int, error) {
 	v := getenv(name)
@@ -67,10 +83,53 @@ func intFromEnv(getenv func(string) string, name string, def, lo, hi int) (int, 
 	return n, nil
 }
 
+// GRPCContentTypes is the CRS list of request content types (rule 920420
+// blocks every other one) for the GRPCHosts: the CRS v4 defaults plus gRPC,
+// gRPC-web and Connect, which the Zitadel API and console use on the edge.
+// Every other host keeps the CRS defaults.
+const GRPCContentTypes = "|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json|" +
+	" |application/grpc| |application/grpc+proto| |application/grpc-web| |application/grpc-web+proto| |application/grpc-web-text| |application/grpc-web-text+proto|" +
+	" |application/proto| |application/connect+proto| |application/connect+json|"
+
+// grpcRules returns the rules for the GRPCHosts, or only 900222 without hosts.
+// 900220 and 900221 apply only to a request for a GRPCHosts host AND a gRPC
+// method path (/<package>.<Service>/<Method>), so the login UI on the same host
+// keeps the CRS defaults.
+//
+//   - 900220: such a request gets the GRPCContentTypes list.
+//   - 900221: such a request with a binary protobuf body (gRPC, gRPC-web,
+//     Connect proto) is not body-inspected. Every gRPC frame starts with null
+//     bytes, which CRS reads as form arguments and blocks (rule 920270). The
+//     method, URI, query and headers are still checked. Text bodies (Connect
+//     JSON, gRPC-web-text in base64) keep body inspection.
+//   - 900222: more than one Content-Type header gets 400 on every host, so a
+//     second header cannot switch off the body check for a body the backend
+//     reads as something else.
+func grpcRules(hosts []string) []string {
+	rules := []string{
+		`SecRule &REQUEST_HEADERS:Content-Type "@gt 1" "id:900222,phase:1,deny,status:400,t:none,log,msg:'More than one Content-Type header'"`,
+	}
+	if len(hosts) == 0 {
+		return rules
+	}
+	quoted := make([]string, len(hosts))
+	for i, h := range hosts {
+		quoted[i] = regexp.QuoteMeta(h)
+	}
+	host := fmt.Sprintf(`SecRule REQUEST_HEADERS:Host "@rx ^(?:%s)(?::[0-9]+)?$"`, strings.Join(quoted, "|"))
+	path := `  SecRule REQUEST_FILENAME "@rx ^/[a-z0-9_]+(?:\.[a-z0-9_]+)*\.[A-Za-z0-9_]+/[A-Za-z0-9_]+$" "t:none,chain"`
+	return append(rules,
+		host+` "id:900220,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+path+"\n"+
+			fmt.Sprintf(`  SecAction "setvar:'tx.allowed_request_content_type=%s'"`, GRPCContentTypes),
+		host+` "id:900221,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+path+"\n"+
+			`  SecRule REQUEST_HEADERS:Content-Type "@rx ^application/(?:grpc(?:-web)?(?:\+proto)?|connect\+proto|proto)(?:;|$)" "t:none,t:lowercase,ctl:requestBodyAccess=Off"`,
+	)
+}
+
 // Directives returns the SecLang directives for cfg. CRS is read from the
 // embedded coraza-coreruleset files, so the container needs no rule files.
 func Directives(cfg Config) string {
-	return strings.Join([]string{
+	d := []string{
 		"Include @coraza.conf-recommended",
 		"SecRuleEngine " + cfg.Engine,
 		"SecRequestBodyAccess On",
@@ -83,8 +142,10 @@ func Directives(cfg Config) string {
 		"SecAuditEngine Off",
 		"Include @crs-setup.conf.example",
 		fmt.Sprintf(`SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d"`, cfg.ParanoiaLevel),
-		"Include @owasp_crs/*.conf",
-	}, "\n")
+	}
+	d = append(d, grpcRules(cfg.GRPCHosts)...)
+	d = append(d, "Include @owasp_crs/*.conf")
+	return strings.Join(d, "\n")
 }
 
 // Handler is the forwardAuth endpoint.
