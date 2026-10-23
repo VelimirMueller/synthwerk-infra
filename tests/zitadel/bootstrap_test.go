@@ -172,6 +172,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"id": id, "signingKey": "key-" + id})
 	case strings.HasPrefix(p, "/v2/actions/targets/"):
 		id := strings.TrimPrefix(p, "/v2/actions/targets/")
+		if f.targets[id] == nil {
+			w.WriteHeader(http.StatusNotFound)
+			reply(map[string]any{"code": 5, "message": "target not found"})
+			return
+		}
 		in["id"], in["signingKey"] = id, f.targets[id]["signingKey"]
 		f.targets[id] = in
 		reply(map[string]any{})
@@ -420,6 +425,14 @@ func TestWrongOrgPATFails(t *testing.T) {
 }
 
 func TestConfigRejectsWildcardAndRelativeURIs(t *testing.T) {
+	if _, err := bootstrap.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL" {
+			return "identity-hooks:8081/x"
+		}
+		return ""
+	}); err == nil {
+		t.Error("hook URL without scheme: want an error")
+	}
 	for _, uri := range []string{"https://*.example.com/cb", "/callback", "javascript:alert(1)", " , "} {
 		_, err := bootstrap.ConfigFromEnv(func(k string) string {
 			if k == "SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS" {

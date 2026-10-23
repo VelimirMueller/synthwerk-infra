@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -79,6 +80,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	}
 	if _, err := time.ParseDuration(cfg.AccessTokenLifetime); err != nil {
 		return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME: %w", err)
+	}
+	if u := cfg.IdentityHookURL; u != "" {
+		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
+			return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL %q: want an absolute http(s) URL", u)
+		}
 	}
 	for _, u := range append(slices.Clone(cfg.StudioRedirectURIs), cfg.StudioLogoutURIs...) {
 		if strings.Contains(u, "*") || (!strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://")) {
@@ -544,7 +550,8 @@ const IdentityHookTarget = "identity-user-created"
 var HookEvents = []string{"user.human.added"}
 
 // ensureIdentityHook creates or updates the target, writes its signing key for
-// identity and points the event executions at it. Zitadel caches executions and
+// identity and points the event executions at it. The bootstrap owns these
+// executions: their target list is replaced, not merged. Zitadel caches executions and
 // targets, so a change can take some seconds to apply.
 func ensureIdentityHook(ctx context.Context, c *Client, cfg Config) error {
 	want := map[string]any{
