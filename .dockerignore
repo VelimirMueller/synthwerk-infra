@@ -3,3 +3,4 @@
 !go.sum
 !waf/
 !cmd/
+!zitadel/

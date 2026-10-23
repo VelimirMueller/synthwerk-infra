@@ -205,7 +205,21 @@ services:
       ZITADEL_EXTERNALSECURE: ${SYNTHWERK_ZITADEL_EXTERNAL_SECURE:-false}
       # With a DSN, Zitadel uses this role directly: database-init creates it (no superuser).
       ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:${SYNTHWERK_ZITADEL_DB_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/zitadel?sslmode=disable
+      # First instance (applies only when the instance is created). The platform org is
+      # "synthwerk". The first human gets a generated password, never Zitadel's default.
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: synthwerk
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: zitadel-admin
+      # init-env.sh writes hex; the suffix meets Zitadel's default complexity policy
+      # (upper, lower, digit, symbol). The first start fails without it.
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${SYNTHWERK_ZITADEL_ADMIN_PASSWORD:?run scripts/init-env.sh to write .env}Aa1!
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      # Machine user for zitadel-bootstrap (IAM owner). Its PAT goes to the volume
+      # zitadel-admin, which only zitadel and zitadel-bootstrap mount: zitadel-login
+      # mounts zitadel-bootstrap and must never read an IAM owner token.
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel/admin/admin.pat
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bootstrap-admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: synthwerk bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
       ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
       ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
       ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Automatically Initialized IAM_LOGIN_CLIENT
@@ -223,6 +237,7 @@ services:
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_INSECURE: "true"
     volumes:
       - zitadel-bootstrap:/zitadel/bootstrap
+      - zitadel-admin:/zitadel/admin
     networks: [app, data]
     depends_on:
       database-init:
@@ -258,6 +273,40 @@ services:
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "node", "/app/healthcheck.mjs", "http://localhost:3000/ui/v2/login/healthy"]
+
+  # One-shot: the Zitadel setup as code (zitadel/bootstrap). Demo org, project
+  # synthwerk-api and roles, studio OIDC app, login/password/token policies.
+  # A rerun changes nothing. It calls Zitadel directly, not through the edge:
+  # the WAF allows only GET, HEAD, POST and OPTIONS.
+  # Reads admin.pat and writes studio-client.json (client id and secret) in the
+  # volume zitadel-admin. selftest also reads the login-client PAT.
+  zitadel-bootstrap:
+    build:
+      context: .
+      dockerfile: zitadel/Dockerfile
+    image: synthwerk-zitadel-bootstrap:local
+    # Root without capabilities: admin.pat and the volume are root-owned (see zitadel).
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    environment:
+      SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
+      SYNTHWERK_ZITADEL_URL: http://zitadel:8080
+      SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
+      SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS:-http://localhost:3000/api/auth/callback}
+      SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS:-http://localhost:3000/}
+      SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME: ${SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME:-300s}
+      # Local and ci only: empty on dev and prd, so no test user exists there.
+      SYNTHWERK_ZITADEL_TEST_USER_PASSWORD: ${SYNTHWERK_ZITADEL_TEST_USER_PASSWORD:-}
+    volumes:
+      - zitadel-admin:/zitadel/admin
+      - zitadel-bootstrap:/zitadel/bootstrap:ro
+    networks: [app]
+    depends_on:
+      zitadel:
+        condition: service_healthy
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
   # Image from synthwerk-identity main 4f444a4, pinned by digest.
@@ -350,3 +399,4 @@ volumes:
   ollama-models: {}
   # Zitadel login-client PAT. Holds a secret: never copy it out of the stack.
   zitadel-bootstrap: {}
+  zitadel-admin: {}

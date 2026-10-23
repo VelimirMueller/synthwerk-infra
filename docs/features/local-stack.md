@@ -4,7 +4,7 @@ slug: local-stack
 status: beta
 epic: E1
 owner: infra
-paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**"]
+paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "zitadel/**"]
 api: []
 events: []
 mcp: []
@@ -29,6 +29,7 @@ updated: 2026-10-23
 - Keeps the bus and the database on an internal network without published ports.
 - Starts Ollama only with the `ollama` profile.
 - Runs the one-shot `database-init` on every `up` (`compose/database/init.sql`, idempotent). It creates the roles `identity` and `llm`, each owning one schema in the `synthwerk` database, and the role `zitadel` owning the `zitadel` database. It applies the passwords from `.env` on every run.
+- Runs the one-shot `zitadel-bootstrap` after Zitadel is healthy: orgs, project, roles, studio app and sign-in policies as code. See [Zitadel setup as code](zitadel-bootstrap.md).
 - Starts Zitadel v4.20.0 (`zitadel`) and its Login UI v2 (`zitadel-login`), per D-42. The edge routes them by host name: `/` and `/ui/v2/login*` go to the login UI, everything else goes to the API over h2c.
 - Starts synthwerk-identity and synthwerk-llm from their GHCR images, pinned by digest. `/llm` uses the stream chain (no buffering) for SSE.
 - Adds the CORS middleware `edge-cors` on `/identity` and `/llm`. Origins come from `SYNTHWERK_CORS_ORIGINS`. Methods are GET, POST and OPTIONS. Headers are `Authorization` and `Content-Type`. No credentials.
@@ -63,7 +64,7 @@ updated: 2026-10-23
 | Dev VPS (D-42) | `SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN=synthwerkauth.velimir-mueller.de`, `_EXTERNAL_PORT=443`, `_EXTERNAL_SECURE=true`, `_PUBLIC_SCHEME=https`, `_PUBLIC_URL=https://synthwerkauth.velimir-mueller.de` |
 | Generated secrets | `*_PASSWORD`, `*_SECRET` (48 hex characters), `*_MASTERKEY` (32 hex characters), by `scripts/init-env.sh` |
 | Service database roles | `identity` and `llm`: own schema, `search_path` set, CONNECT and CREATE on `synthwerk` only (the migrations run `CREATE SCHEMA IF NOT EXISTS`). `zitadel`: owns the `zitadel` database. No role can reach another role's schema or database. |
-| Zitadel containers | Run as root without capabilities (`cap_drop: ALL`, `no-new-privileges`, read-only). The login UI must read the PAT file that the API writes into the root-owned volume `zitadel-bootstrap`. |
+| Zitadel containers | Run as root without capabilities (`cap_drop: ALL`, `no-new-privileges`, read-only). The login UI must read the PAT file that the API writes into the root-owned volume `zitadel-bootstrap`. The IAM owner PAT goes to a separate volume, `zitadel-admin`, which the login UI does not mount. |
 | Memory (measured 2026-10-23, idle) | zitadel 92 MiB, zitadel-login 82 MiB, identity 51 MiB, llm 10 MiB. The spike measured 230–360 MiB for Zitadel after sign-ins. The whole stack is about 1.4 GiB, of which telemetry is about 870 MiB. The 7.7 GiB VPS has room. |
 
 ## Events
@@ -82,7 +83,7 @@ updated: 2026-10-23
 
 - `tests/stack/stack_test.sh` — `stack - every default service - healthy`
 - `tests/stack/stack_test.sh` — `pulse stream - stub stopped - down within 30 s, ok after start`
-- `tests/stack/stack_test.sh` — `database-init - one-shot - exited 0`
+- `tests/stack/stack_test.sh` — `database-init, zitadel-bootstrap - one-shot - exited 0`
 - `tests/stack/stack_test.sh` — `edge - identity, llm, Zitadel (ready, OIDC discovery, login UI, gRPC-web) - 200; SQL injection on the auth host - 403`
 - `tests/stack/stack_test.sh` — `database - role llm - no access to schema identity or database zitadel`
 - `tests/stack/stack_test.sh` — `CORS preflight - allowed origin - allow-origin set; foreign origin - not set`
@@ -96,3 +97,4 @@ updated: 2026-10-23
 | 2026-10-21 | First version. Pulse slot open for synthwerk#26. |
 | 2026-10-21 | Pulse joins the stack (synthwerk#24, synthwerk#26). |
 | 2026-10-23 | Zitadel, identity and llm join the stack, with database roles, CORS and gRPC through the WAF (SW-M2-0.4). |
+| 2026-10-23 | The one-shot `zitadel-bootstrap` joins the stack; the admin PAT moves to the volume `zitadel-admin` (synthwerk#28 task 2). |
