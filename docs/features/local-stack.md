@@ -58,7 +58,7 @@ updated: 2026-10-23
 | Health check timeout in CI | 300 s |
 | Service env | `SYNTHWERK_PLATFORM_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` (anchor `x-service-env`) |
 | Service OTLP | gRPC on `telemetry:4317` (anchor `x-service-env`). The edge sends OTLP HTTP on 4318 from `traefik.yml`. |
-| Pulse check interval | 5 s per infra target, 15 s per service target. Down after 2 failed checks, up after 3 good checks. |
+| Pulse check interval | 5 s per target. Down after 2 failed checks, up after 3 good checks. |
 | Zitadel URL | `http://auth.localhost:8080`. Domain, port, secure flag and URL come from `SYNTHWERK_ZITADEL_*`. They must match the public URL, else Zitadel answers "Instance not found". They are fixed at the first start of a volume. |
 | Dev VPS (D-42) | `SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN=synthwerkauth.velimir-mueller.de`, `_EXTERNAL_PORT=443`, `_EXTERNAL_SECURE=true`, `_PUBLIC_SCHEME=https`, `_PUBLIC_URL=https://synthwerkauth.velimir-mueller.de` |
 | Generated secrets | `*_PASSWORD`, `*_SECRET` (48 hex characters), `*_MASTERKEY` (32 hex characters), by `scripts/init-env.sh` |
