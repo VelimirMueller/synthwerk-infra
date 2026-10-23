@@ -32,9 +32,13 @@ http:
       service: llm
 
     # Zitadel on its own host (D-42). The rule is a template: the host comes from
-    # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container. The file provider
-    # renders Go templates in every file (no .tmpl name needed); the stack test
-    # proves it with the Zitadel host routes and the CORS origins.
+    # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
+    # Templating: the Traefik file provider renders Go templates (with Sprig) in
+    # every dynamic configuration file. The name needs no .tmpl suffix; the docs say
+    # only "Go Templating only works with dedicated dynamic configuration files".
+    # Proof on traefik v3.7.16: tests/stack/stack_test.sh gets 200 from the
+    # Zitadel login UI and OIDC discovery through these Host rules, and the CORS
+    # preflight returns the origin from SYNTHWERK_CORS_ORIGINS (middlewares.yml).
     # "/" goes to the login UI, /ui/v2/login* to the login UI, everything else to the
     # API (OIDC, gRPC, Connect, console) over h2c. Same split as the Zitadel compose.
     zitadel-root:
