@@ -67,6 +67,8 @@ services:
       OTEL_SERVICE_NAME: synthwerk-waf
       SYNTHWERK_WAF_ENGINE: ${SYNTHWERK_WAF_ENGINE:-On}
       SYNTHWERK_WAF_PARANOIA_LEVEL: ${SYNTHWERK_WAF_PARANOIA_LEVEL:-1}
+      # Only the Zitadel host may send gRPC, gRPC-web and Connect (waf.GRPCHosts).
+      SYNTHWERK_WAF_GRPC_HOSTS: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
     networks: [app]
     healthcheck:
       <<: *healthcheck

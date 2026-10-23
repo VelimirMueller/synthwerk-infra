@@ -59,6 +59,8 @@ expect_status "Zitadel login UI" 200 "${AUTH_RESOLVE[@]}" "$AUTH/ui/v2/login/hea
 expect_status "Zitadel gRPC-web passes the WAF" 200 "${AUTH_RESOLVE[@]}" -X POST \
   -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' --data-binary @/dev/null \
   "$AUTH/zitadel.admin.v1.AdminService/Healthz"
+expect_status "gRPC content type on /llm gets 403" 403 -X POST -H 'Content-Type: application/grpc' \
+  --data '{"cmd":"; cat /etc/passwd"}' "$EDGE/llm/v1/chat"
 expect_status "SQL injection on the auth host gets 403" 403 "${AUTH_RESOLVE[@]}" \
   "$AUTH/oauth/v2/authorize?client_id=1%27%20OR%20%271%27=%271"
 issuer=$(curl -s --max-time 10 "${AUTH_RESOLVE[@]}" "$AUTH/.well-known/openid-configuration" | grep -o '"issuer":"[^"]*"' || true)

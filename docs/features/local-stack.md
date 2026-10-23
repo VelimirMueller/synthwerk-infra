@@ -32,7 +32,8 @@ updated: 2026-10-23
 - Starts Zitadel v4.20.0 (`zitadel`) and its Login UI v2 (`zitadel-login`), per D-42. The edge routes them by host name: `/` and `/ui/v2/login*` go to the login UI, everything else goes to the API over h2c.
 - Starts synthwerk-identity and synthwerk-llm from their GHCR images, pinned by digest. `/llm` uses the stream chain (no buffering) for SSE.
 - Adds the CORS middleware `edge-cors` on `/identity` and `/llm`. Origins come from `SYNTHWERK_CORS_ORIGINS`. Methods are GET, POST and OPTIONS. Headers are `Authorization` and `Content-Type`. No credentials.
-- Lets gRPC, gRPC-web and Connect pass the WAF (Zitadel console and SDKs): they are on the CRS content-type list, and their binary body is not inspected. The URI, query and headers are still checked.
+- Lets gRPC, gRPC-web and Connect pass the WAF on the Zitadel host only (`SYNTHWERK_WAF_GRPC_HOSTS`, set from the Zitadel domain). There they are on the CRS content-type list, and their binary body is not inspected. The URI, query and headers are still checked. Every other host keeps the CRS defaults.
+- Answers 400 to a request with more than one `Content-Type` header.
 - Leaves JetStream streams (for example `EVT_LLM`) to the services: each service creates its own stream at start, like pulse.
 
 ## How to use
@@ -85,7 +86,7 @@ updated: 2026-10-23
 - `tests/stack/stack_test.sh` — `edge - identity, llm, Zitadel (ready, OIDC discovery, login UI, gRPC-web) - 200; SQL injection on the auth host - 403`
 - `tests/stack/stack_test.sh` — `database - role llm - no access to schema identity or database zitadel`
 - `tests/stack/stack_test.sh` — `CORS preflight - allowed origin - allow-origin set; foreign origin - not set`
-- `tests/waf/waf_test.go` — `gRPC, gRPC-web, Connect proto - 200; unknown content type - 403; SQL injection in a gRPC-web query - 403`
+- `tests/waf/waf_test.go` — `gRPC, gRPC-web, Connect proto on the gRPC host - 200; gRPC on another or a lookalike host - 403; unknown content type - 403; SQL injection in a gRPC-web query - 403; two Content-Type headers - 400`
 - `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` and the stack test
 
 ## Changes
