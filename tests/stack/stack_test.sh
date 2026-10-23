@@ -134,11 +134,11 @@ if grep -qE '"Client(Addr|Host)"' <<<"$logs"; then fail "the access log has the 
 if grep -q '"RouterName":"stub@file"' <<<"$logs"; then pass "access log is written"; else fail "no access log line for the stub router"; fi
 
 echo "# pulse streams the status of each service (synthwerk#26)"
-# wait_for <pattern> <seconds>: true when the stream log holds the pattern in time.
+# wait_for <ERE pattern> <seconds>: true when the stream log holds the pattern in time.
 wait_for() {
   local pattern=$1 limit=$2 start=$SECONDS
   while ((SECONDS - start < limit)); do
-    grep -q -- "$pattern" "$stream_log" && return 0
+    grep -qE -- "$pattern" "$stream_log" && return 0
     sleep 1
   done
   return 1
@@ -148,10 +148,10 @@ curl -sN --max-time 180 "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/nul
 stream_pid=$!
 if wait_for '^event: snapshot' 10; then pass "stream starts with a snapshot"; else fail "no snapshot on the pulse stream"; fi
 # The snapshot data line can land after the event line: wait for each target.
-# A target turns ok after 3 good checks (5 s apart), so a service that just
-# started can need about 15 s: wait up to 30 s.
+# A target turns ok after 3 good checks (5 s apart), so a service that started
+# just before pulse is ok only in a later change event ("from" before "status").
 for svc in edge waf bus database telemetry stub zitadel zitadel-login identity llm; do
-  if wait_for "\"target\":\"$svc\",\"status\":\"ok\"" 30; then pass "snapshot: $svc ok"; else fail "snapshot: $svc not ok"; fi
+  if wait_for "\"target\":\"$svc\",(\"from\":\"[a-z]+\",)?\"status\":\"ok\"" 30; then pass "$svc ok on the stream"; else fail "$svc not ok on the stream within 30 s"; fi
 done
 docker compose stop stub >/dev/null 2>&1
 start=$SECONDS
