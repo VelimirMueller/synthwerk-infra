@@ -3,7 +3,8 @@
 # result as JUnit XML (e2e-junit.xml, one test case per check) and stop the stack.
 # Used by ci.yml (e2e on dispatch) and promote.yml (e2e before stg).
 #
-# Usage: tests/stack/e2e.sh   (exit code = exit code of the stack test)
+# Usage: tests/stack/e2e.sh   (exit code = exit code of the stack test; 1 when it printed no
+# "ok" or "FAIL" line, the output format of stack_test.sh)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -45,6 +46,14 @@ while IFS= read -r line; do
     cases+="    <testcase classname=\"stack\" name=\"$name\"/>"$'\n'
   fi
 done <"$log"
+
+# No check line means the stack test did not run its checks: report that as a failure.
+if ((total == 0)); then
+  total=1
+  failed=1
+  cases="    <testcase classname=\"stack\" name=\"stack test output\"><failure message=\"no ok or FAIL line\"/></testcase>"$'\n'
+  ((status != 0)) || status=1
+fi
 
 {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
