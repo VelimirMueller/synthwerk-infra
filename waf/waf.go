@@ -91,14 +91,17 @@ const GRPCContentTypes = "|application/x-www-form-urlencoded| |multipart/form-da
 	" |application/grpc| |application/grpc+proto| |application/grpc-web| |application/grpc-web+proto| |application/grpc-web-text| |application/grpc-web-text+proto|" +
 	" |application/proto| |application/connect+proto| |application/connect+json|"
 
-// grpcRules returns the rules for the GRPCHosts, or nothing without hosts.
+// grpcRules returns the rules for the GRPCHosts, or only 900222 without hosts.
+// 900220 and 900221 apply only to a request for a GRPCHosts host AND a gRPC
+// method path (/<package>.<Service>/<Method>), so the login UI on the same host
+// keeps the CRS defaults.
 //
-//   - 900220: a GRPCHosts request gets the GRPCContentTypes list.
-//   - 900221: a GRPCHosts request with a binary protobuf body (gRPC, gRPC-web,
+//   - 900220: such a request gets the GRPCContentTypes list.
+//   - 900221: such a request with a binary protobuf body (gRPC, gRPC-web,
 //     Connect proto) is not body-inspected. Every gRPC frame starts with null
 //     bytes, which CRS reads as form arguments and blocks (rule 920270). The
-//     method, URI, query and headers are still checked. Connect JSON keeps
-//     body inspection.
+//     method, URI, query and headers are still checked. Text bodies (Connect
+//     JSON, gRPC-web-text in base64) keep body inspection.
 //   - 900222: more than one Content-Type header gets 400 on every host, so a
 //     second header cannot switch off the body check for a body the backend
 //     reads as something else.
@@ -114,10 +117,12 @@ func grpcRules(hosts []string) []string {
 		quoted[i] = regexp.QuoteMeta(h)
 	}
 	host := fmt.Sprintf(`SecRule REQUEST_HEADERS:Host "@rx ^(?:%s)(?::[0-9]+)?$"`, strings.Join(quoted, "|"))
+	path := `  SecRule REQUEST_FILENAME "@rx ^/[a-z0-9_]+(?:\.[a-z0-9_]+)*\.[A-Za-z0-9_]+/[A-Za-z0-9_]+$" "t:none,chain"`
 	return append(rules,
-		host+fmt.Sprintf(` "id:900220,phase:1,pass,t:none,t:lowercase,nolog,setvar:'tx.allowed_request_content_type=%s'"`, GRPCContentTypes),
-		host+` "id:900221,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+
-			`  SecRule REQUEST_HEADERS:Content-Type "@rx ^application/(?:grpc|connect\+proto|proto)(?:[+;-]|$)" "t:none,t:lowercase,ctl:requestBodyAccess=Off"`,
+		host+` "id:900220,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+path+"\n"+
+			fmt.Sprintf(`  SecAction "setvar:'tx.allowed_request_content_type=%s'"`, GRPCContentTypes),
+		host+` "id:900221,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+path+"\n"+
+			`  SecRule REQUEST_HEADERS:Content-Type "@rx ^application/(?:grpc(?:-web)?(?:\+proto)?|connect\+proto|proto)(?:;|$)" "t:none,t:lowercase,ctl:requestBodyAccess=Off"`,
 	)
 }
 

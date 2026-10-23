@@ -69,9 +69,14 @@ if [[ "$issuer" == "\"issuer\":\"$AUTH\"" ]]; then pass "issuer is $AUTH"; else 
 echo "# database roles see only their own schema"
 # psql_as <role> <sql> [database]: run as a service role inside the database container.
 psql_as() {
-  local role=$1 sql=$2 db=${3:-${SYNTHWERK_POSTGRES_DB:-synthwerk}} var
+  local role=$1 sql=$2 db=${3:-${SYNTHWERK_POSTGRES_DB:-synthwerk}} var password
   var="SYNTHWERK_$(tr '[:lower:]' '[:upper:]' <<<"$role")_DB_PASSWORD"
-  docker compose exec -T -e PGPASSWORD="$(grep "^$var=" .env | cut -d= -f2-)" database \
+  password=$(grep "^$var=" .env | cut -d= -f2- || true)
+  if [[ -z "$password" ]]; then
+    echo "no $var in .env"
+    return
+  fi
+  docker compose exec -T -e PGPASSWORD="$password" database \
     psql -h 127.0.0.1 -U "$role" -d "$db" -tAc "$sql" 2>&1 || true
 }
 if [[ "$(psql_as identity 'SHOW search_path')" == "identity" ]]; then pass "identity search_path"; else fail "identity search_path"; fi

@@ -81,6 +81,10 @@ func TestCheck_KnownAttack_Returns403(t *testing.T) {
 			map[string]string{"Content-Type": "application/grpc"}),
 		"command injection as grpc on another host": forwardAuth(http.MethodPost, "/llm/v1/chat", `{"cmd":"; cat /etc/passwd"}`,
 			map[string]string{"Content-Type": "application/grpc"}),
+		"command injection as grpc-web-text on the gRPC host": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", "user=admin%27%20OR%201=1--",
+			map[string]string{"Content-Type": "application/grpc-web-text", "X-Forwarded-Host": grpcHost}),
+		"grpc to the login UI path on the gRPC host": forwardAuth(http.MethodPost, "/ui/v2/login/login", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": grpcHost}),
 		"gRPC host with a lookalike name": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
 			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": "auth.localhost.evil.example"}),
 	}

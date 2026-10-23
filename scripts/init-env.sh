@@ -28,6 +28,8 @@ if [[ ! -f .env ]]; then
 fi
 
 added=0
+# A last line without a newline would swallow the first appended key.
+[[ -s .env && -n "$(tail -c 1 .env)" ]] && printf '\n' >> .env
 while IFS= read -r line || [[ -n "$line" ]]; do
   line=${line%$'\r'}
   [[ "$line" =~ ^(SYNTHWERK_[A-Z0-9_]*)= ]] || continue
