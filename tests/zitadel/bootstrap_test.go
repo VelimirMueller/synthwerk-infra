@@ -36,6 +36,8 @@ type fake struct {
 	policies map[string]map[string]any
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
+	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
+	unavailable int
 }
 
 func newFake() *fake {
@@ -85,6 +87,12 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	if f.unavailable > 0 {
+		f.unavailable--
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 14, "message": "connection error"})
+		return
+	}
 	if r.Host != "auth.test" || r.Header.Get("Authorization") != "Bearer pat" {
 		http.Error(w, `{"code":16,"message":"unauthenticated"}`, http.StatusUnauthorized)
 		return
@@ -519,5 +527,14 @@ func TestNoIdentityHookWithoutURL(t *testing.T) {
 	run(t, c, cfg)
 	if len(f.targets) != 0 || len(f.execs) != 0 {
 		t.Errorf("targets %d, executions %d without SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL", len(f.targets), len(f.execs))
+	}
+}
+
+func TestWaitsForAStartingZitadel(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	f.unavailable = 1
+	run(t, c, cfg)
+	if f.calls[0] != "GET /management/v1/orgs/me" || f.calls[1] != "GET /management/v1/orgs/me" {
+		t.Errorf("want the first read repeated, got %v", f.calls[:2])
 	}
 }

@@ -117,7 +117,7 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 			Name string `json:"name"`
 		} `json:"org"`
 	}
-	if err := c.Do(ctx, http.MethodGet, "/management/v1/orgs/me", "", nil, &me); err != nil {
+	if err := waitReady(ctx, c, &me); err != nil {
 		return r, err
 	}
 	if me.Org.Name != PlatformOrg {
@@ -655,4 +655,26 @@ func writeKey(path, key string, owner int) error {
 		return fmt.Errorf("chown %s: %w", tmp, err)
 	}
 	return os.Rename(tmp, path)
+}
+
+// ReadyTimeout bounds waitReady.
+var ReadyTimeout = 90 * time.Second
+
+// waitReady repeats the first read until Zitadel answers it. Zitadel reports
+// ready before its API gateway accepts calls: the first call can get 503,
+// code 14 "connection error" (seen on a CI runner). Only that answer is retried.
+func waitReady(ctx context.Context, c *Client, out any) error {
+	deadline := time.Now().Add(ReadyTimeout)
+	for {
+		err := c.Do(ctx, http.MethodGet, "/management/v1/orgs/me", "", nil, out)
+		var e *APIError
+		if err == nil || !errors.As(err, &e) || e.Status != http.StatusServiceUnavailable || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
