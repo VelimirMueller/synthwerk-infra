@@ -34,3 +34,16 @@ targets:
     kind: http
     url: http://stub:8080/
     interval: 5s
+  # Services poll every 15 s (the pulse default).
+  - name: zitadel
+    kind: http
+    url: http://zitadel:8080/debug/ready
+  - name: zitadel-login
+    kind: http
+    url: http://zitadel-login:3000/ui/v2/login/healthy
+  - name: identity
+    kind: http
+    url: http://identity:8080/readyz
+  - name: llm
+    kind: http
+    url: http://llm:8080/readyz

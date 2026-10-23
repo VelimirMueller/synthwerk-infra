@@ -34,6 +34,22 @@ http:
         maxBodySize: 1048576
         maxResponseBodySize: 4096
 
+    # CORS for the browser APIs (/identity, /llm). Origins from SYNTHWERK_CORS_ORIGINS
+    # (comma list, set on the edge container), read by the file provider template.
+    # Put it first on a router: Traefik answers a preflight here, before the WAF.
+    # No credentials: the APIs take a bearer token, not cookies.
+    edge-cors:
+      headers:
+        accessControlAllowOriginList:
+{{- range $origin := splitList "," (env "SYNTHWERK_CORS_ORIGINS") }}
+          - {{ trim $origin | quote }}
+{{- end }}
+        accessControlAllowMethods: [GET, POST, OPTIONS]
+        accessControlAllowHeaders: [Authorization, Content-Type]
+        accessControlAllowCredentials: false
+        accessControlMaxAge: 600
+        addVaryHeader: true
+
     edge-headers:
       headers:
         contentTypeNosniff: true

@@ -16,7 +16,51 @@ http:
       middlewares: [edge-secure-stream, strip-service-prefix]
       service: pulse
 
+    # identity: JSON API for the browser. CORS first, then the normal chain.
+    identity:
+      rule: PathPrefix(`/identity/`)
+      entryPoints: [web]
+      middlewares: [edge-cors, edge-secure, strip-service-prefix]
+      service: identity
+
+    # llm: the chat answer is a long-lived SSE response, so the chain is the
+    # stream chain (no "buffering"), like pulse. The WAF still checks every request.
+    llm:
+      rule: PathPrefix(`/llm/`)
+      entryPoints: [web]
+      middlewares: [edge-cors, edge-secure-stream, strip-service-prefix]
+      service: llm
+
+    # Zitadel on its own host (D-42). The rule is a template: the host comes from
+    # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
+    # "/" goes to the login UI, /ui/v2/login* to the login UI, everything else to the
+    # API (OIDC, gRPC, Connect, console) over h2c. Same split as the Zitadel compose.
+    zitadel-root:
+      rule: Host(`{{ env "SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN" }}`) && Path(`/`)
+      entryPoints: [web]
+      priority: 400
+      middlewares: [edge-secure, zitadel-root-to-login]
+      service: zitadel-login
+
+    zitadel-login:
+      rule: Host(`{{ env "SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN" }}`) && PathPrefix(`/ui/v2/login`)
+      entryPoints: [web]
+      priority: 300
+      middlewares: [edge-secure]
+      service: zitadel-login
+
+    zitadel:
+      rule: Host(`{{ env "SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN" }}`)
+      entryPoints: [web]
+      priority: 200
+      middlewares: [edge-secure]
+      service: zitadel
+
   middlewares:
+    zitadel-root-to-login:
+      replacePath:
+        path: /ui/v2/login/
+
     strip-service-prefix:
       stripPrefixRegex:
         regex: ["^/[a-z0-9-]+"]
@@ -32,3 +76,24 @@ http:
       loadBalancer:
         servers:
           - url: http://pulse:8080
+
+    identity:
+      loadBalancer:
+        servers:
+          - url: http://identity:8080
+
+    llm:
+      loadBalancer:
+        servers:
+          - url: http://llm:8080
+
+    # The Zitadel API speaks gRPC and HTTP/1.1 on one port without TLS: h2c.
+    zitadel:
+      loadBalancer:
+        servers:
+          - url: h2c://zitadel:8080
+
+    zitadel-login:
+      loadBalancer:
+        servers:
+          - url: http://zitadel-login:3000

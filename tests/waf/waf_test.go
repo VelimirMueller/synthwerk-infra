@@ -35,6 +35,9 @@ func blockingHandler(t *testing.T) *waf.Handler {
 	return handler
 }
 
+// grpcFrame is one gRPC message frame: flag 0, length 2, protobuf field 1 = 1.
+const grpcFrame = "\x00\x00\x00\x00\x02\x08\x01"
+
 // forwardAuth builds the request that Traefik sends to the WAF.
 func forwardAuth(method, uri, body string, header map[string]string) *http.Request {
 	r := httptest.NewRequestWithContext(context.Background(), method, "http://waf:8080/check", strings.NewReader(body))
@@ -61,6 +64,10 @@ func TestCheck_KnownAttack_Returns403(t *testing.T) {
 			map[string]string{"Content-Type": "application/x-www-form-urlencoded"}),
 		"command injection in json body": forwardAuth(http.MethodPost, "/stub/run", `{"cmd":"; cat /etc/passwd"}`,
 			map[string]string{"Content-Type": "application/json"}),
+		"content type not on the list": forwardAuth(http.MethodPost, "/stub/upload", "data",
+			map[string]string{"Content-Type": "application/x-unknown"}),
+		"sql injection in a grpc-web path": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz?id=1%27%20OR%20%271%27=%271", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc-web+proto"}),
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -80,6 +87,13 @@ func TestCheck_BenignRequest_Returns200(t *testing.T) {
 		"query text": forwardAuth(http.MethodGet, "/stub/search?q=red+synthesizer&page=2", "", nil),
 		"json body": forwardAuth(http.MethodPost, "/stub/notes", `{"title":"Hello","text":"A short note about filters."}`,
 			map[string]string{"Content-Type": "application/json"}),
+		// Zitadel API and console on the edge (gRPC, gRPC-web, Connect).
+		"grpc-web proto": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc-web+proto", "X-Grpc-Web": "1"}),
+		"grpc": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
+			map[string]string{"Content-Type": "application/grpc"}),
+		"connect proto": forwardAuth(http.MethodPost, "/zitadel.settings.v2.SettingsService/GetGeneralSettings", "\x08\x01",
+			map[string]string{"Content-Type": "application/proto"}),
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -150,6 +164,15 @@ func TestConfigFromEnv_InvalidValue_ReturnsError(t *testing.T) {
 				t.Fatalf("%s=%q: want error", name, value)
 			}
 		})
+	}
+}
+
+func TestDirectives_SetsContentTypesBeforeCRS(t *testing.T) {
+	d := waf.Directives(waf.Config{Engine: "On", ParanoiaLevel: 1, BodyLimitBytes: 1024})
+	ct := strings.Index(d, "tx.allowed_request_content_type=")
+	crs := strings.Index(d, "Include @owasp_crs/")
+	if ct < 0 || crs < 0 || ct > crs {
+		t.Fatalf("content types must be set before the CRS rules:\n%s", d)
 	}
 }
 

@@ -1,4 +1,5 @@
-# Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse.
+# Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
+# identity and llm.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -35,6 +36,9 @@ services:
     environment:
       # The OTel resource detector needs USER when Traefik runs without cgo as non-root.
       USER: traefik
+      # Read by the CORS middleware template in dynamic/middlewares.yml.
+      SYNTHWERK_CORS_ORIGINS: ${SYNTHWERK_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
     ports:
       - "127.0.0.1:${SYNTHWERK_EDGE_HTTP_PORT:-8080}:8000"
     volumes:
@@ -139,6 +143,160 @@ services:
       <<: *healthcheck
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
 
+  # One-shot: roles, schemas and the zitadel database (compose/database/init.sql).
+  # docker-entrypoint-initdb.d runs only on an empty volume, so this runs on every
+  # `up` instead. The script is idempotent and applies rotated passwords.
+  database-init:
+    <<: *hardening
+    restart: "no"
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    user: "70:70"
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      PGHOST: database
+      PGUSER: ${SYNTHWERK_POSTGRES_USER:-synthwerk}
+      PGPASSWORD: ${SYNTHWERK_POSTGRES_PASSWORD:?run scripts/init-env.sh to write .env}
+      PGDATABASE: ${SYNTHWERK_POSTGRES_DB:-synthwerk}
+      IDENTITY_PASSWORD: ${SYNTHWERK_IDENTITY_DB_PASSWORD:?run scripts/init-env.sh to write .env}
+      LLM_PASSWORD: ${SYNTHWERK_LLM_DB_PASSWORD:?run scripts/init-env.sh to write .env}
+      ZITADEL_PASSWORD: ${SYNTHWERK_ZITADEL_DB_PASSWORD:?run scripts/init-env.sh to write .env}
+    # $$ = a literal $ for the shell in the container, not compose interpolation.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        exec psql -X -q -v ON_ERROR_STOP=1
+        -v identity_password="$$IDENTITY_PASSWORD"
+        -v llm_password="$$LLM_PASSWORD"
+        -v zitadel_password="$$ZITADEL_PASSWORD"
+        -f /init/init.sql
+    volumes:
+      - ./compose/database/init.sql:/init/init.sql:ro
+    networks: [data]
+    depends_on:
+      database:
+        condition: service_healthy
+
+  # Zitadel v4 (D-42): OIDC, API and console. Login UI v2 is zitadel-login.
+  # Reached on the edge by host name: http://auth.localhost:8080 locally.
+  # The first start writes the instance (issuer = external domain and port) and the
+  # login-client PAT into the volume zitadel-bootstrap. A changed domain needs
+  # a new instance: `docker compose down --volumes`.
+  zitadel:
+    <<: *hardening
+    image: ghcr.io/zitadel/zitadel:v4.20.0@sha256:9ea0e9ecfdc43115da871242e40a0320f2ece864c7cd8b5d41a863a7f4902499
+    # Root without capabilities: the named volume is root-owned, and the PAT file the
+    # API writes there must be readable by zitadel-login (also root). cap_drop ALL and
+    # no-new-privileges stay on.
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    # The masterkey comes from the env, so it is not in the process arguments.
+    command: ["start-from-init", "--masterkeyFromEnv"]
+    environment:
+      ZITADEL_MASTERKEY: ${SYNTHWERK_ZITADEL_MASTERKEY:?run scripts/init-env.sh to write .env}
+      ZITADEL_PORT: 8080
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_EXTERNALDOMAIN: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
+      ZITADEL_EXTERNALPORT: ${SYNTHWERK_ZITADEL_EXTERNAL_PORT:-${SYNTHWERK_EDGE_HTTP_PORT:-8080}}
+      ZITADEL_EXTERNALSECURE: ${SYNTHWERK_ZITADEL_EXTERNAL_SECURE:-false}
+      # With a DSN, Zitadel uses this role directly: database-init creates it (no superuser).
+      ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:${SYNTHWERK_ZITADEL_DB_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/zitadel?sslmode=disable
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Automatically Initialized IAM_LOGIN_CLIENT
+      # Quoted: unquoted, YAML reads a timestamp and the start fails.
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "true"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: ${SYNTHWERK_ZITADEL_PUBLIC_URL:-http://auth.localhost:8080}/ui/v2/login/
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: ${SYNTHWERK_ZITADEL_PUBLIC_URL:-http://auth.localhost:8080}/ui/v2/login/login?authRequest=
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: ${SYNTHWERK_ZITADEL_PUBLIC_URL:-http://auth.localhost:8080}/ui/v2/login/logout?post_logout_redirect=
+      ZITADEL_SAML_DEFAULTLOGINURLV2: ${SYNTHWERK_ZITADEL_PUBLIC_URL:-http://auth.localhost:8080}/ui/v2/login/login?samlRequest=
+      ZITADEL_LOGSTORE_ACCESS_STDOUT_ENABLED: "false"
+      ZITADEL_INSTRUMENTATION_SERVICENAME: synthwerk-zitadel
+      ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: grpc
+      ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_ENDPOINT: telemetry:4317
+      ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_INSECURE: "true"
+    volumes:
+      - zitadel-bootstrap:/zitadel/bootstrap
+    networks: [app, data]
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *healthcheck
+      start_period: 60s
+      test: ["CMD", "/app/zitadel", "ready"]
+
+  # Zitadel Login UI v2 (Next.js), on the edge at /ui/v2/login of the auth host.
+  zitadel-login:
+    <<: *hardening
+    image: ghcr.io/zitadel/zitadel-login:v4.20.0@sha256:f1abfdf3c5d16eda03cad3b584226207ecc640ca5c679d7c45abbbce7d1d63f0
+    # Root without capabilities, to read the PAT file the API wrote (see zitadel).
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs: [/tmp]
+    environment:
+      ZITADEL_API_URL: http://zitadel:8080
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel/bootstrap/login-client.pat
+      # Signs the Login UI session cookie (32+ characters).
+      ZITADEL_SESSION_COOKIE_SECRET: ${SYNTHWERK_ZITADEL_LOGIN_COOKIE_SECRET:?run scripts/init-env.sh to write .env}
+      # The API finds its instance by host name.
+      CUSTOM_REQUEST_HEADERS: Host:${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost},X-Forwarded-Proto:${SYNTHWERK_ZITADEL_PUBLIC_SCHEME:-http}
+    volumes:
+      - zitadel-bootstrap:/zitadel/bootstrap:ro
+    networks: [app]
+    depends_on:
+      zitadel:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "node", "/app/healthcheck.mjs", "http://localhost:3000/ui/v2/login/healthy"]
+
+  # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
+  # Image from synthwerk-identity main 4f444a4, pinned by digest.
+  identity:
+    <<: *hardening
+    image: ghcr.io/velimirmueller/synthwerk-identity:sha-4f444a4be47b4e1ca60978fd22d7d0d06104724f@sha256:34962d23df48d8ed92be2dc9f4c54da53a5b3714f2b8227f6446422326f67795
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-identity
+      SYNTHWERK_IDENTITY_HTTP_ADDR: ":8080"
+      SYNTHWERK_IDENTITY_DATABASE_URL: postgres://identity:${SYNTHWERK_IDENTITY_DB_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
+    networks: [app, data]
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/identity", "healthcheck"]
+
+  # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
+  # Image from synthwerk-llm main 59f4681 (healthcheck subcommand), pinned by digest.
+  llm:
+    <<: *hardening
+    image: ghcr.io/velimirmueller/synthwerk-llm:sha-59f4681c183f78fd7594cc5d906d9d261d03a1fe@sha256:0c3b418a9f8d426eced7a8fffa061b9060dd08b2e8bc5c232038293e1ec97516
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-llm
+      SYNTHWERK_LLM_HTTP_ADDR: ":8080"
+      SYNTHWERK_LLM_DATABASE_URL: postgres://llm:${SYNTHWERK_LLM_DB_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
+    networks: [app, data]
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/llm", "healthcheck"]
+
   # Telemetry: grafana/otel-lgtm (OTel Collector, Grafana, Loki, Tempo, Prometheus).
   # D-36: all-in-one until M3, then SigNoz. OTLP on 4317 (gRPC) and 4318 (HTTP).
   telemetry:
@@ -188,3 +346,5 @@ volumes:
   database-data: {}
   telemetry-data: {}
   ollama-models: {}
+  # Zitadel login-client PAT. Holds a secret: never copy it out of the stack.
+  zitadel-bootstrap: {}

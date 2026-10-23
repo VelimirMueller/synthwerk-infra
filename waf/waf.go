@@ -67,6 +67,21 @@ func intFromEnv(getenv func(string) string, name string, def, lo, hi int) (int, 
 	return n, nil
 }
 
+// AllowedContentTypes is the CRS list of request content types (rule 920420
+// blocks every other one): the CRS v4 defaults plus gRPC, gRPC-web and Connect,
+// which the Zitadel API and console use on the edge. CRS has no body parser for
+// them: binaryBodyRule turns body access off for them (see there).
+const AllowedContentTypes = "|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json|" +
+	" |application/grpc| |application/grpc+proto| |application/grpc-web| |application/grpc-web+proto| |application/grpc-web-text| |application/grpc-web-text+proto|" +
+	" |application/proto| |application/connect+proto| |application/connect+json|"
+
+// binaryBodyRule stops body inspection for gRPC, gRPC-web and Connect proto
+// bodies. They are binary protobuf: every gRPC frame starts with null bytes, which
+// CRS reads as form arguments and blocks (rule 920270). The method, the URI, the
+// query and the headers are still checked. Connect JSON keeps body inspection.
+const binaryBodyRule = `SecRule REQUEST_HEADERS:Content-Type "@rx ^application/(?:grpc|connect\+proto|proto)(?:[+;-]|$)" ` +
+	`"id:900221,phase:1,pass,t:none,t:lowercase,nolog,ctl:requestBodyAccess=Off"`
+
 // Directives returns the SecLang directives for cfg. CRS is read from the
 // embedded coraza-coreruleset files, so the container needs no rule files.
 func Directives(cfg Config) string {
@@ -83,6 +98,8 @@ func Directives(cfg Config) string {
 		"SecAuditEngine Off",
 		"Include @crs-setup.conf.example",
 		fmt.Sprintf(`SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d"`, cfg.ParanoiaLevel),
+		fmt.Sprintf(`SecAction "id:900220,phase:1,pass,t:none,nolog,setvar:'tx.allowed_request_content_type=%s'"`, AllowedContentTypes),
+		binaryBodyRule,
 		"Include @owasp_crs/*.conf",
 	}, "\n")
 }
