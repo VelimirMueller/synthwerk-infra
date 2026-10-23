@@ -23,11 +23,12 @@ set -e
 # xml_escape <text>: escape the five XML special characters.
 xml_escape() {
   local s=$1
-  s=${s//&/&amp;}
-  s=${s//</&lt;}
-  s=${s//>/&gt;}
-  s=${s//\"/&quot;}
-  s=${s//\'/&apos;}
+  # Quoted replacements: bash 5.2 reads a bare & in the replacement as the match.
+  s=${s//&/'&amp;'}
+  s=${s//</'&lt;'}
+  s=${s//>/'&gt;'}
+  s=${s//\"/'&quot;'}
+  s=${s//\'/"&apos;"}
   printf '%s' "$s"
 }
 
