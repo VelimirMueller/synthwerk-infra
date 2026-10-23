@@ -55,11 +55,13 @@ http:
       middlewares: [edge-secure]
       service: zitadel-login
 
+    # Stream chain: gRPC server streams must not be held by "buffering". The WAF
+    # still limits a request body to 1 MiB (forwardAuth maxBodySize).
     zitadel:
       rule: Host(`{{ env "SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN" }}`)
       entryPoints: [web]
       priority: 200
-      middlewares: [edge-secure]
+      middlewares: [edge-secure-stream]
       service: zitadel
 
   middlewares:

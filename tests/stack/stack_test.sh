@@ -55,6 +55,10 @@ expect_status "GET /identity/readyz" 200 "$EDGE/identity/readyz"
 expect_status "GET /llm/readyz" 200 "$EDGE/llm/readyz"
 expect_status "Zitadel /debug/ready" 200 "${AUTH_RESOLVE[@]}" "$AUTH/debug/ready"
 expect_status "Zitadel OIDC discovery" 200 "${AUTH_RESOLVE[@]}" "$AUTH/.well-known/openid-configuration"
+# A response over 4 KiB passes the edge (the 4 KiB cap is on the WAF answer only).
+script=$(curl -s --max-time 10 "${AUTH_RESOLVE[@]}" "$AUTH/ui/console/" | grep -o 'src="[^"]*\.js"' | head -n 1 | cut -d'"' -f2 || true)
+size=$(curl -s -o /dev/null -w '%{size_download}' --max-time 10 "${AUTH_RESOLVE[@]}" "$AUTH/ui/console/$script" || true)
+if ((${size:-0} > 4096)); then pass "console script of $size bytes passes the edge"; else fail "console script '$script': got ${size:-0} bytes"; fi
 expect_status "Zitadel login UI" 200 "${AUTH_RESOLVE[@]}" "$AUTH/ui/v2/login/healthy"
 expect_status "Zitadel gRPC-web passes the WAF" 200 "${AUTH_RESOLVE[@]}" -X POST \
   -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' --data-binary @/dev/null \

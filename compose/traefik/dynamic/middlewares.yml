@@ -18,7 +18,8 @@ http:
         period: 1s
         burst: 100
 
-    # Requests larger than 1 MiB get 413 before the WAF reads them.
+    # Requests larger than 1 MiB get 413 before the WAF reads them. No response
+    # size limit, but the response is held until it ends: streams use the stream chain.
     edge-body-limit:
       buffering:
         maxRequestBodyBytes: 1048576
@@ -32,6 +33,7 @@ http:
         preserveRequestMethod: true
         forwardBody: true
         maxBodySize: 1048576
+        # Caps the WAF's own answer to Traefik, not the backend response.
         maxResponseBodySize: 4096
 
     # CORS for the browser APIs (/identity, /llm). Origins from SYNTHWERK_CORS_ORIGINS
