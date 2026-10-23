@@ -1,0 +1,421 @@
+package zitadel_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/VelimirMueller/synthwerk-infra/zitadel/bootstrap"
+)
+
+// fake is a small in-memory Zitadel: the paths and answer shapes the bootstrap
+// uses, measured on Zitadel v4.20.0 (an empty search returns no "result").
+type fake struct {
+	mu       sync.Mutex
+	next     int
+	calls    []string
+	orgs     map[string]string // name -> id
+	projects map[string]string // name -> id
+	roles    map[string]bool
+	grants   map[string][]string // granted org id -> role keys
+	apps     map[string]string   // name -> id
+	users    map[string]string   // org/user -> id
+	ugrants  map[string][]string // user id -> role keys
+	secrets  int
+	policies map[string]map[string]any
+	// notChanged answers every PUT with Zitadel's "not changed" error.
+	notChanged bool
+}
+
+func newFake() *fake {
+	return &fake{
+		orgs: map[string]string{"synthwerk": "o-platform"}, projects: map[string]string{},
+		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
+		users: map[string]string{}, ugrants: map[string][]string{},
+		policies: map[string]map[string]any{
+			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
+				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
+			"/admin/v1/settings/oidc": {"accessTokenLifetime": "43200s", "idTokenLifetime": "43200s"},
+		},
+	}
+}
+
+func (f *fake) id(prefix string) string { f.next++; return fmt.Sprintf("%s-%d", prefix, f.next) }
+
+// creates lists the calls that make a new object.
+func (f *fake) creates() []string {
+	var out []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "POST ") && !strings.HasSuffix(c, "/_search") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (f *fake) puts() []string {
+	var out []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "PUT ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+var (
+	reProject = regexp.MustCompile(`^/management/v1/projects/([^/]+)$`)
+	reSub     = regexp.MustCompile(`^/management/v1/projects/[^/]+/(roles|grants|apps)(/.*)?$`)
+	reUser    = regexp.MustCompile(`^/management/v1/users/([^/]+)/(password|grants)(/.*)?$`)
+)
+
+func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	if r.Host != "auth.test" || r.Header.Get("Authorization") != "Bearer pat" {
+		http.Error(w, `{"code":16,"message":"unauthenticated"}`, http.StatusUnauthorized)
+		return
+	}
+	var in map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	org := r.Header.Get("x-zitadel-orgid")
+	reply := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+	result := func(items []map[string]any) {
+		if len(items) == 0 {
+			reply(map[string]any{"details": map[string]any{}})
+			return
+		}
+		reply(map[string]any{"result": items})
+	}
+	if r.Method == http.MethodPut && f.notChanged {
+		w.WriteHeader(http.StatusBadRequest)
+		reply(map[string]any{"code": 9, "message": "Default Password Complexity Policy has not been changed (INSTANCE-9jlsf)"})
+		return
+	}
+	p := r.URL.Path
+	switch {
+	case p == "/management/v1/orgs/me":
+		reply(map[string]any{"org": map[string]any{"id": "o-platform", "name": "synthwerk"}})
+	case p == "/admin/v1/orgs/_search":
+		var items []map[string]any
+		for n, id := range f.orgs {
+			if n == queryName(in) {
+				items = append(items, map[string]any{"id": id, "name": n})
+			}
+		}
+		result(items)
+	case p == "/management/v1/orgs":
+		id := f.id("o")
+		f.orgs[in["name"].(string)] = id
+		reply(map[string]any{"id": id})
+	case p == "/management/v1/projects/_search":
+		var items []map[string]any
+		if id, ok := f.projects[queryName(in)]; ok {
+			items = append(items, map[string]any{"id": id, "name": queryName(in)})
+		}
+		result(items)
+	case p == "/management/v1/projects":
+		id := f.id("p")
+		f.projects[in["name"].(string)] = id
+		reply(map[string]any{"id": id})
+	case reProject.MatchString(p) && r.Method == http.MethodPut:
+		reply(map[string]any{})
+	case reSub.MatchString(p):
+		f.project(w, r.Method, p, in, reply, result)
+	case p == "/management/v1/users/_search":
+		var items []map[string]any
+		if id, ok := f.users[org+"/"+userName(in)]; ok {
+			items = append(items, map[string]any{"id": id})
+		}
+		result(items)
+	case p == "/management/v1/users/human/_import":
+		id := f.id("u")
+		f.users[org+"/"+in["userName"].(string)] = id
+		reply(map[string]any{"userId": id})
+	case p == "/management/v1/users/grants/_search":
+		var items []map[string]any
+		for uid, keys := range f.ugrants {
+			if strings.Contains(fmt.Sprint(in), uid+"]") {
+				items = append(items, map[string]any{"id": "g-" + uid, "roleKeys": keys})
+			}
+		}
+		result(items)
+	case reUser.MatchString(p):
+		m := reUser.FindStringSubmatch(p)
+		if m[2] == "grants" && r.Method == http.MethodPost {
+			f.ugrants[m[1]] = strSlice(in["roleKeys"])
+		}
+		reply(map[string]any{})
+	case p == "/admin/v1/policies/password/complexity", p == "/admin/v1/policies/password/lockout":
+		if r.Method == http.MethodPut {
+			f.policies[p] = in
+		}
+		reply(map[string]any{})
+	case f.policies[p] != nil:
+		key := "policy"
+		if strings.Contains(p, "/settings/") {
+			key = "settings"
+		}
+		if r.Method == http.MethodPut {
+			f.policies[p] = in
+			reply(map[string]any{})
+			return
+		}
+		cur := map[string]any{"details": map[string]any{"sequence": "1"}, "isDefault": true}
+		for k, v := range f.policies[p] {
+			cur[k] = v
+		}
+		reply(map[string]any{key: cur})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		reply(map[string]any{"code": 5, "message": "fake: no route " + r.Method + " " + p})
+	}
+}
+
+func (f *fake) project(w http.ResponseWriter, method, p string, in map[string]any, reply func(any), result func([]map[string]any)) {
+	m := reSub.FindStringSubmatch(p)
+	kind, rest := m[1], m[2]
+	switch {
+	case kind == "roles" && rest == "/_search":
+		var items []map[string]any
+		for k := range f.roles {
+			items = append(items, map[string]any{"key": k})
+		}
+		result(items)
+	case kind == "roles":
+		key := in["roleKey"].(string)
+		if f.roles[key] {
+			w.WriteHeader(http.StatusConflict)
+			reply(map[string]any{"code": 6, "message": "already exists"})
+			return
+		}
+		f.roles[key] = true
+		reply(map[string]any{})
+	case kind == "grants" && rest == "/_search":
+		var items []map[string]any
+		for org, keys := range f.grants {
+			items = append(items, map[string]any{"grantId": "pg-" + org, "grantedOrgId": org, "grantedRoleKeys": keys})
+		}
+		result(items)
+	case kind == "grants" && method == http.MethodPost:
+		org := in["grantedOrgId"].(string)
+		f.grants[org] = strSlice(in["roleKeys"])
+		reply(map[string]any{"grantId": "pg-" + org})
+	case kind == "grants":
+		reply(map[string]any{})
+	case kind == "apps" && rest == "/_search":
+		var items []map[string]any
+		if id, ok := f.apps[queryName(in)]; ok {
+			items = append(items, map[string]any{"id": id, "name": queryName(in), "oidcConfig": map[string]any{"clientId": "cid-" + id}})
+		}
+		result(items)
+	case kind == "apps" && rest == "/oidc":
+		id := f.id("a")
+		f.apps[in["name"].(string)] = id
+		f.secrets++
+		reply(map[string]any{"appId": id, "clientId": "cid-" + id, "clientSecret": "secret-1"})
+	case kind == "apps" && strings.HasSuffix(rest, "/_generate_client_secret"):
+		f.secrets++
+		reply(map[string]any{"clientSecret": fmt.Sprintf("secret-%d", f.secrets)})
+	default:
+		reply(map[string]any{})
+	}
+}
+
+func queryName(in map[string]any) string {
+	qs, _ := in["queries"].([]any)
+	for _, q := range qs {
+		if nq, ok := q.(map[string]any)["nameQuery"].(map[string]any); ok {
+			return nq["name"].(string)
+		}
+	}
+	return ""
+}
+
+func userName(in map[string]any) string {
+	qs, _ := in["queries"].([]any)
+	for _, q := range qs {
+		if uq, ok := q.(map[string]any)["userNameQuery"].(map[string]any); ok {
+			return uq["userName"].(string)
+		}
+	}
+	return ""
+}
+
+func strSlice(v any) []string {
+	var out []string
+	for _, s := range v.([]any) {
+		out = append(out, s.(string))
+	}
+	return out
+}
+
+func setup(t *testing.T, env map[string]string) (*fake, *bootstrap.Client, bootstrap.Config) {
+	t.Helper()
+	f := newFake()
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	env["SYNTHWERK_ZITADEL_STUDIO_CLIENT_FILE"] = filepath.Join(t.TempDir(), "studio-client.json")
+	cfg, err := bootstrap.ConfigFromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, &bootstrap.Client{BaseURL: srv.URL, Host: "auth.test", Token: "pat"}, cfg
+}
+
+func run(t *testing.T, c *bootstrap.Client, cfg bootstrap.Config) bootstrap.Result {
+	t.Helper()
+	r, err := bootstrap.Run(context.Background(), c, cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestRunTwiceCreatesNothingTheSecondTime(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_TEST_USER_PASSWORD": "hex"})
+	first := run(t, c, cfg)
+	if len(f.roles) != len(bootstrap.Roles) || len(f.apps) != 1 || len(f.users) != len(bootstrap.TestUsers) {
+		t.Fatalf("first run: roles %d, apps %d, users %d", len(f.roles), len(f.apps), len(f.users))
+	}
+	f.calls = nil
+	second := run(t, c, cfg)
+	// Only the password reset of the test users may write (POST .../password).
+	for _, call := range f.creates() {
+		if !strings.HasSuffix(call, "/password") {
+			t.Errorf("second run created %s", call)
+		}
+	}
+	for _, call := range f.puts() {
+		if strings.Contains(call, "/policies/login") || strings.Contains(call, "/settings/oidc") {
+			t.Errorf("second run changed an unchanged policy: %s", call)
+		}
+	}
+	if first.ProjectID != second.ProjectID || first.StudioAppID != second.StudioAppID || first.DemoOrgID != second.DemoOrgID {
+		t.Errorf("ids changed between runs: %+v vs %+v", first, second)
+	}
+	if f.secrets != 1 {
+		t.Errorf("client secret made %d times, want 1 (the file exists)", f.secrets)
+	}
+}
+
+func TestPolicyUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	login := f.policies["/admin/v1/policies/login"]
+	if login["forceMfa"] != true || login["allowRegister"] != false {
+		t.Errorf("login policy not applied: %v", login)
+	}
+	if login["allowExternalIdp"] != true || login["passwordCheckLifetime"] != "864000s" || login["secondFactors"] == nil {
+		t.Errorf("login policy lost fields it does not own: %v", login)
+	}
+	if _, ok := login["details"]; ok {
+		t.Errorf("PUT sent the read-only details: %v", login)
+	}
+	oidc := f.policies["/admin/v1/settings/oidc"]
+	if oidc["accessTokenLifetime"] != "300s" || oidc["idTokenLifetime"] != "43200s" {
+		t.Errorf("oidc settings: %v", oidc)
+	}
+}
+
+func TestNotChangedCountsAsSuccess(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	f.notChanged = true
+	f.policies["/admin/v1/policies/login"]["forceMfa"] = false // force a PUT
+	run(t, c, cfg)
+}
+
+func TestMissingClientFileMakesANewSecret(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	if err := os.Remove(cfg.StudioClientFile); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, cfg)
+	raw, err := os.ReadFile(cfg.StudioClientFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc bootstrap.StudioClient
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		t.Fatal(err)
+	}
+	if f.secrets != 2 || sc.ClientSecret != "secret-2" || sc.ClientID == "" {
+		t.Errorf("secrets %d, file %+v", f.secrets, sc)
+	}
+	if st, _ := os.Stat(cfg.StudioClientFile); st.Mode().Perm() != 0o600 {
+		t.Errorf("client file mode %v, want 0600", st.Mode().Perm())
+	}
+}
+
+func TestForeignClientFileMakesANewSecret(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	if err := os.WriteFile(cfg.StudioClientFile, []byte(`{"app_id":"other","client_id":"x","client_secret":"y"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, cfg)
+	if f.secrets != 2 {
+		t.Errorf("secrets %d, want 2: a file for another app must not count", f.secrets)
+	}
+}
+
+func TestNoTestUsersWithoutPassword(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	if len(f.users) != 0 {
+		t.Errorf("made %d users without SYNTHWERK_ZITADEL_TEST_USER_PASSWORD", len(f.users))
+	}
+}
+
+func TestWrongOrgPATFails(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	c.Token = "other"
+	if _, err := bootstrap.Run(context.Background(), c, cfg, slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("want an error for a bad PAT")
+	}
+	if len(f.creates()) != 0 {
+		t.Errorf("created %v with a bad PAT", f.creates())
+	}
+}
+
+func TestConfigRejectsWildcardAndRelativeURIs(t *testing.T) {
+	for _, uri := range []string{"https://*.example.com/cb", "/callback", "javascript:alert(1)", " , "} {
+		_, err := bootstrap.ConfigFromEnv(func(k string) string {
+			if k == "SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS" {
+				return uri
+			}
+			return ""
+		})
+		if err == nil {
+			t.Errorf("%q: want an error", uri)
+		}
+	}
+}
+
+func TestCheckRoles(t *testing.T) {
+	claims := map[string]any{
+		"urn:zitadel:iam:user:resourceowner:id": "o-1",
+		bootstrap.RolesClaim:                    map[string]any{"member": map[string]any{"o-1": "demo.localhost"}},
+	}
+	if err := bootstrap.CheckRoles(claims, "o-1", "member"); err != nil {
+		t.Error(err)
+	}
+	if err := bootstrap.CheckRoles(claims, "o-1", "admin"); err == nil {
+		t.Error("admin: want an error")
+	}
+	if err := bootstrap.CheckRoles(claims, "o-2", "member"); err == nil {
+		t.Error("other org: want an error")
+	}
+}

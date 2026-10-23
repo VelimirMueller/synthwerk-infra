@@ -34,7 +34,8 @@ expect_status() {
 }
 
 # One-shot services: they must have exited with code 0, not be healthy.
-oneshot=" database-init "
+# Space on both ends: the loop matches *" $svc "*.
+oneshot=" database-init zitadel-bootstrap "
 
 echo "# every default service is running and healthy"
 # "config --services" lists only the services of the active profiles (none by default,
@@ -69,6 +70,16 @@ expect_status "SQL injection on the auth host gets 403" 403 "${AUTH_RESOLVE[@]}"
   "$AUTH/oauth/v2/authorize?client_id=1%27%20OR%20%271%27=%271"
 issuer=$(curl -s --max-time 10 "${AUTH_RESOLVE[@]}" "$AUTH/.well-known/openid-configuration" | grep -o '"issuer":"[^"]*"' || true)
 if [[ "$issuer" == "\"issuer\":\"$AUTH\"" ]]; then pass "issuer is $AUTH"; else fail "issuer: got '${issuer:-none}', want $AUTH"; fi
+
+echo "# Zitadel setup as code (zitadel/bootstrap)"
+# A second run on the real Zitadel must succeed (idempotent).
+if out=$(docker compose run --rm --no-deps zitadel-bootstrap 2>&1); then pass "zitadel-bootstrap rerun exits 0"; else fail "zitadel-bootstrap rerun: $(grep -o '"err":"[^"]*"' <<<"$out" || echo "$out" | tail -n 3)"; fi
+# Signs both test users in without a browser and checks org and roles in the token.
+out=$(docker compose run --rm --no-deps zitadel-bootstrap selftest 2>&1 || true)
+if [[ $(grep -c '"msg":"selftest ok"' <<<"$out") == 2 ]]; then pass "selftest: token claims carry org and role"; else fail "selftest: $(grep -o '"err":"[^"]*"' <<<"$out" || echo no output)"; fi
+# The login UI must not see the IAM owner token.
+out=$(docker compose exec -T zitadel-login sh -c 'test -e /zitadel/admin && echo present || echo absent' 2>&1 || true)
+if [[ "$out" == "absent" ]]; then pass "zitadel-login cannot read the admin PAT"; else fail "zitadel-login sees /zitadel/admin: $out"; fi
 
 echo "# database roles see only their own schema"
 # psql_as <role> <sql> [database]: run as a service role inside the database container.
