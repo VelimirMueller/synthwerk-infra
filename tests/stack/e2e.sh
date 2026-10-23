@@ -65,6 +65,9 @@ fi
   printf '  </testsuite>\n</testsuites>\n'
 } >e2e-junit.xml
 
+# A FAIL line fails the run, also when the stack test itself exited 0.
+((failed == 0)) || ((status != 0)) || status=1
+
 if ((status != 0)); then
   docker compose logs --no-color --tail 200
 fi
