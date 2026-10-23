@@ -236,13 +236,14 @@ services:
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_ENDPOINT: telemetry:4317
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_INSECURE: "true"
       # Action targets (webhooks): Zitadel's default deny list blocks every private
-      # range. This is that list with one hole: zitadel-hooks (172.31.250.0/28), where
-      # only identity listens. 172.16.0.0/12 is split around the hole. Keep the CIDRs:
+      # range. This is that list with one hole: identity's fixed address on
+      # zitadel-hooks, 172.31.250.10/32. The gateway (.1) and Zitadel's own address
+      # stay denied. 172.16.0.0/12 is split around the hole. Keep the CIDRs:
       # the dialer checks resolved IPs with them (DNS rebinding).
       # "::ffff:0:0/96" from the default list is left out: in v4.20.0 it matches every
       # IPv4 address, so no IPv4 target works with it. The IPv4 CIDRs above also block
       # IPv4-mapped literals such as [::ffff:127.0.0.1] (measured 2026-10-23).
-      ZITADEL_HTTPCLIENT_DENYLIST: "localhost,0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/13,172.24.0.0/14,172.28.0.0/15,172.30.0.0/16,172.31.0.0/17,172.31.128.0/18,172.31.192.0/19,172.31.224.0/20,172.31.240.0/21,172.31.248.0/23,172.31.250.16/28,172.31.250.32/27,172.31.250.64/26,172.31.250.128/25,172.31.251.0/24,172.31.252.0/22,192.168.0.0/16,198.18.0.0/15,::/128,::1/128,fc00::/7,fe80::/10"
+      ZITADEL_HTTPCLIENT_DENYLIST: "localhost,0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/13,172.24.0.0/14,172.28.0.0/15,172.30.0.0/16,172.31.0.0/17,172.31.128.0/18,172.31.192.0/19,172.31.224.0/20,172.31.240.0/21,172.31.248.0/23,172.31.250.0/29,172.31.250.8/31,172.31.250.11/32,172.31.250.12/30,172.31.250.16/28,172.31.250.32/27,172.31.250.64/26,172.31.250.128/25,172.31.251.0/24,172.31.252.0/22,192.168.0.0/16,198.18.0.0/15,::/128,::1/128,fc00::/7,fe80::/10"
     volumes:
       - zitadel-bootstrap:/zitadel/bootstrap
       - zitadel-admin:/zitadel/admin
@@ -346,8 +347,10 @@ services:
       app: {}
       data: {}
       # Only this alias resolves to the zitadel-hooks address, which the deny list allows.
+      # Fixed: the deny list opens exactly this address.
       zitadel-hooks:
         aliases: [identity-hooks]
+        ipv4_address: 172.31.250.10
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -417,7 +420,7 @@ networks:
   data:
     internal: true
   # Zitadel Action webhooks: Zitadel calls identity here, and nothing else.
-  # Fixed subnet: ZITADEL_HTTPCLIENT_DENYLIST leaves exactly this /28 open.
+  # Fixed subnet: identity has 172.31.250.10, the one address ZITADEL_HTTPCLIENT_DENYLIST leaves open.
   zitadel-hooks:
     internal: true
     ipam:

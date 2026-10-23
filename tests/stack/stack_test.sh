@@ -99,6 +99,12 @@ for _ in $(seq 1 30); do
   sleep 3
 done
 if ((rows == 1)); then pass "new user $user_id is one user.created row in the identity outbox"; else fail "user.created for '${user_id:-no user}': got ${rows:-0} rows, want 1"; fi
+# The deny list opens identity's address only: a target on the gateway (the host) is refused.
+out=$(docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  curlimages/curl:8.17.0 -c "curl -s -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+  -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/actions/targets \
+  -d '{\"name\":\"gateway-probe-$$\",\"restWebhook\":{},\"endpoint\":\"http://172.31.250.1:8080/x\",\"timeout\":\"5s\"}'" || true)
+if [[ "$out" == *"DeniedURL"* ]]; then pass "Action target on the zitadel-hooks gateway is denied"; else fail "gateway target not denied: ${out:0:120}"; fi
 expect_status "hook path through the edge gets 404" 404 -X POST --data '{}' "$EDGE/identity/internal/zitadel/actions"
 out=$(docker compose exec -T zitadel-login sh -c 'wget -q -S -O /dev/null --post-data "{}" http://identity:8081/internal/zitadel/actions 2>&1 | head -n 1' || true)
 if [[ "$out" == *"401"* ]]; then pass "unsigned hook call gets 401"; else fail "unsigned hook call: '$out'"; fi

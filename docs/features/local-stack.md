@@ -55,7 +55,7 @@ updated: 2026-10-23
 | Edge port on the host | `127.0.0.1:8080` (`SYNTHWERK_EDGE_HTTP_PORT`) |
 | Telemetry ports on the host | `127.0.0.1:3000` UI, `4317` OTLP gRPC, `4318` OTLP HTTP |
 | Bus and database ports on the host | none |
-| Networks | `edge` (published), `app`, `data` and `zitadel-hooks` (internal; `zitadel-hooks` = Zitadel and identity only, subnet `172.31.250.0/28`), `models` (Ollama egress) |
+| Networks | `edge` (published), `app`, `data` and `zitadel-hooks` (internal; `zitadel-hooks` = Zitadel and identity (`172.31.250.10`) only, subnet `172.31.250.0/28`), `models` (Ollama egress) |
 | Health check timeout in CI | 300 s |
 | Service env | `SYNTHWERK_PLATFORM_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` (anchor `x-service-env`) |
 | Service OTLP | gRPC on `telemetry:4317` (anchor `x-service-env`). The edge sends OTLP HTTP on 4318 from `traefik.yml`. |
