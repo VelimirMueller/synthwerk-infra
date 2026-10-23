@@ -14,8 +14,11 @@ trap 'rm -f "$log"; docker compose down --volumes >/dev/null 2>&1 || true' EXIT
 scripts/init-env.sh
 docker compose up --build --wait --wait-timeout 300
 
-status=0
-tests/stack/stack_test.sh | tee "$log" || status=$?
+# PIPESTATUS keeps the exit code of the stack test itself, not the one of tee.
+set +e
+tests/stack/stack_test.sh | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
 
 # xml_escape <text>: escape the five XML special characters.
 xml_escape() {
