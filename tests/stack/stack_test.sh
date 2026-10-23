@@ -81,6 +81,34 @@ if [[ $(grep -c '"msg":"selftest ok"' <<<"$out") == 2 ]]; then pass "selftest: t
 out=$(docker compose exec -T zitadel-login sh -c 'test -e /zitadel/admin && echo present || echo absent' 2>&1 || true)
 if [[ "$out" == "absent" ]]; then pass "zitadel-login cannot read the admin PAT"; else fail "zitadel-login sees /zitadel/admin: $out"; fi
 
+echo "# Zitadel Actions reach identity (synthwerk#28 task 5)"
+# A new user must reach identity as user.created. The test makes its own user: Zitadel
+# caches executions, so users made in the first seconds after the bootstrap may miss it.
+auth_domain=${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
+user_id=$(docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  curlimages/curl:8.17.0 -c "curl -s -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+  -H 'Content-Type: application/json' -X POST http://zitadel:8080/management/v1/users/human/_import \
+  -d '{\"userName\":\"hook.stack.$$\",\"profile\":{\"firstName\":\"Hook\",\"lastName\":\"Stack\"},\"email\":{\"email\":\"hook.stack.$$@example.test\",\"isEmailVerified\":true}}'" \
+  | grep -o '"userId":"[0-9]*"' | cut -d'"' -f4 || true)
+rows=0
+for _ in $(seq 1 30); do
+  [[ -z "$user_id" ]] && break
+  rows=$(docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc \
+    "SELECT count(*) FROM identity.synthwerk_outbox WHERE nats_subject = 'evt.identity.user.created.v1' AND event->>'subject' = '$user_id'" 2>/dev/null || echo 0)
+  ((rows >= 1)) && break
+  sleep 3
+done
+if ((rows == 1)); then pass "new user $user_id is one user.created row in the identity outbox"; else fail "user.created for '${user_id:-no user}': got ${rows:-0} rows, want 1"; fi
+# The deny list opens identity's address only: a target on the gateway (the host) is refused.
+out=$(docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  curlimages/curl:8.17.0 -c "curl -s -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+  -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/actions/targets \
+  -d '{\"name\":\"gateway-probe-$$\",\"restWebhook\":{},\"endpoint\":\"http://172.31.250.1:8080/x\",\"timeout\":\"5s\"}'" || true)
+if [[ "$out" == *"DeniedURL"* ]]; then pass "Action target on the zitadel-hooks gateway is denied"; else fail "gateway target not denied: ${out:0:120}"; fi
+expect_status "hook path through the edge gets 404" 404 -X POST --data '{}' "$EDGE/identity/internal/zitadel/actions"
+out=$(docker compose exec -T zitadel-login sh -c 'wget -q -S -O /dev/null --post-data "{}" http://identity:8081/internal/zitadel/actions 2>&1 | head -n 1' || true)
+if [[ "$out" == *"401"* ]]; then pass "unsigned hook call gets 401"; else fail "unsigned hook call: '$out'"; fi
+
 echo "# database roles see only their own schema"
 # psql_as <role> <sql> [database]: run as a service role inside the database container.
 psql_as() {

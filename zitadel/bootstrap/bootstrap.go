@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -38,6 +39,14 @@ type Config struct {
 	TestUserPassword string
 	// AccessTokenLifetime is the OIDC access token lifetime, for example "300s".
 	AccessTokenLifetime string
+	// IdentityHookURL is the identity listener for Zitadel Actions (#28 task 5).
+	// Empty = no target and no execution.
+	IdentityHookURL string
+	// IdentityHookKeyFile receives the target signing key (mode 0400, owner
+	// IdentityHookKeyOwner) in the volume zitadel-hooks, which identity reads.
+	IdentityHookKeyFile string
+	// IdentityHookKeyOwner is the uid that owns the key file: identity's nonroot user.
+	IdentityHookKeyOwner int
 }
 
 // TestUser is a user that the bootstrap creates when TestUserPassword is set.
@@ -61,12 +70,21 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		StudioClientFile:    or(getenv("SYNTHWERK_ZITADEL_STUDIO_CLIENT_FILE"), "/zitadel/admin/studio-client.json"),
 		TestUserPassword:    testPassword(getenv("SYNTHWERK_ZITADEL_TEST_USER_PASSWORD")),
 		AccessTokenLifetime: or(getenv("SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME"), "300s"),
+		IdentityHookURL:     getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL"),
+		IdentityHookKeyFile: or(getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE"), "/zitadel/hooks/identity-signing.key"),
+		// 65532: nonroot in the distroless image of synthwerk-identity.
+		IdentityHookKeyOwner: 65532,
 	}
 	if len(cfg.StudioRedirectURIs) == 0 {
 		return Config{}, errors.New("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: want at least one URI")
 	}
 	if _, err := time.ParseDuration(cfg.AccessTokenLifetime); err != nil {
 		return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME: %w", err)
+	}
+	if u := cfg.IdentityHookURL; u != "" {
+		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
+			return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL %q: want an absolute http(s) URL", u)
+		}
 	}
 	for _, u := range append(slices.Clone(cfg.StudioRedirectURIs), cfg.StudioLogoutURIs...) {
 		if strings.Contains(u, "*") || (!strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://")) {
@@ -99,7 +117,7 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 			Name string `json:"name"`
 		} `json:"org"`
 	}
-	if err := c.Do(ctx, http.MethodGet, "/management/v1/orgs/me", "", nil, &me); err != nil {
+	if err := waitReady(ctx, c, &me); err != nil {
 		return r, err
 	}
 	if me.Org.Name != PlatformOrg {
@@ -122,6 +140,12 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 		{"login policy", func() error { return ensureLoginPolicy(ctx, c) }},
 		{"password policy", func() error { return ensurePasswordPolicies(ctx, c) }},
 		{"oidc settings", func() error { return ensureOIDCSettings(ctx, c, cfg.AccessTokenLifetime) }},
+	}
+	if cfg.IdentityHookURL != "" {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }})
 	}
 	if cfg.TestUserPassword != "" {
 		steps = append(steps, struct {
@@ -517,4 +541,140 @@ func or(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// IdentityHookTarget is the name of the Action target that calls identity.
+const IdentityHookTarget = "identity-user-created"
+
+// HookEvents are the Zitadel events identity receives (zitadelhook in synthwerk-identity).
+var HookEvents = []string{"user.human.added"}
+
+// ensureIdentityHook creates or updates the target, writes its signing key for
+// identity and points the event executions at it. The bootstrap owns these
+// executions: their target list is replaced, not merged. Zitadel caches executions and
+// targets, so a change can take some seconds to apply.
+func ensureIdentityHook(ctx context.Context, c *Client, cfg Config) error {
+	want := map[string]any{
+		"name":        IdentityHookTarget,
+		"restWebhook": map[string]any{"interruptOnError": false},
+		"endpoint":    cfg.IdentityHookURL,
+		"timeout":     "10s",
+	}
+	var found struct {
+		Targets []struct {
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Endpoint   string `json:"endpoint"`
+			Timeout    string `json:"timeout"`
+			SigningKey string `json:"signingKey"`
+		} `json:"targets"`
+	}
+	search := map[string]any{"filters": []any{map[string]any{"targetNameFilter": map[string]any{"targetName": IdentityHookTarget, "method": "TEXT_FILTER_METHOD_EQUALS"}}}}
+	if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets/search", "", search, &found); err != nil {
+		return err
+	}
+	var id, key string
+	for _, t := range found.Targets {
+		if t.Name != IdentityHookTarget {
+			continue
+		}
+		id, key = t.ID, t.SigningKey
+		if t.Endpoint != cfg.IdentityHookURL || t.Timeout != "10s" {
+			if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets/"+id, "", want, nil); err != nil && !IsNotChanged(err) {
+				return err
+			}
+		}
+	}
+	if id == "" {
+		var made struct {
+			ID         string `json:"id"`
+			SigningKey string `json:"signingKey"`
+		}
+		if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets", "", want, &made); err != nil {
+			return err
+		}
+		id, key = made.ID, made.SigningKey
+	}
+	if key == "" {
+		return fmt.Errorf("target %s: Zitadel returned no signing key", IdentityHookTarget)
+	}
+	if err := writeKey(cfg.IdentityHookKeyFile, key, cfg.IdentityHookKeyOwner); err != nil {
+		return err
+	}
+	return ensureExecutions(ctx, c, id)
+}
+
+func ensureExecutions(ctx context.Context, c *Client, targetID string) error {
+	var found struct {
+		Executions []struct {
+			Condition struct {
+				Event struct {
+					Event string `json:"event"`
+				} `json:"event"`
+			} `json:"condition"`
+			Targets []string `json:"targets"`
+		} `json:"executions"`
+	}
+	if err := c.Do(ctx, http.MethodPost, "/v2/actions/executions/search", "", map[string]any{}, &found); err != nil {
+		return err
+	}
+	have := map[string][]string{}
+	for _, e := range found.Executions {
+		if e.Condition.Event.Event != "" {
+			have[e.Condition.Event.Event] = e.Targets
+		}
+	}
+	for _, ev := range HookEvents {
+		if slices.Equal(have[ev], []string{targetID}) {
+			continue
+		}
+		body := map[string]any{"condition": map[string]any{"event": map[string]any{"event": ev}}, "targets": []string{targetID}}
+		if err := c.Do(ctx, http.MethodPut, "/v2/actions/executions", "", body, nil); err != nil && !IsNotChanged(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeKey writes key with mode 0400 for owner, only when the content differs.
+// The bootstrap needs CAP_CHOWN for this (compose cap_add).
+func writeKey(path, key string, owner int) error {
+	if cur, err := os.ReadFile(path); err == nil && string(cur) == key { //nolint:gosec // G304: our own path
+		return nil
+	}
+	// Without CAP_DAC_OVERRIDE root cannot read or replace a 0400 file of another
+	// owner, so the compare above fails after the first run and the file is
+	// replaced through a fresh temp file (the directory belongs to root).
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.WriteFile(tmp, []byte(key), 0o400); err != nil {
+		return err
+	}
+	if err := os.Chown(tmp, owner, -1); err != nil { // mode 0400: the group does not matter
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chown %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// ReadyTimeout bounds waitReady.
+var ReadyTimeout = 90 * time.Second
+
+// waitReady repeats the first read until Zitadel answers it. Zitadel reports
+// ready before its API gateway accepts calls: the first call can get 503,
+// code 14 "connection error" (seen on a CI runner). Only that answer is retried.
+func waitReady(ctx context.Context, c *Client, out any) error {
+	deadline := time.Now().Add(ReadyTimeout)
+	for {
+		err := c.Do(ctx, http.MethodGet, "/management/v1/orgs/me", "", nil, out)
+		var e *APIError
+		if err == nil || !errors.As(err, &e) || e.Status != http.StatusServiceUnavailable || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }

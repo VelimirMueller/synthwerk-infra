@@ -28,6 +28,8 @@ updated: 2026-10-23
 - Sets the instance login policy: MFA required (D-47), passkeys allowed, no self-registration (D-51), no hint about unknown user names.
 - Sets the password policy: 12 characters minimum with upper, lower, digit and symbol, lockout after 5 tries.
 - Sets the access token lifetime to 300 s.
+- Creates the Action target `identity-user-created` (`http://identity-hooks:8081/internal/zitadel/actions`) and points the event `user.human.added` at it (synthwerk#28 task 5).
+- Writes the target signing key to `identity-signing.key` (mode 0400, owner 65532) in the volume `zitadel-hooks`, which identity reads. Zitadel returns the key in every target search, so each run can write it.
 - Creates the test users `operator.test` (platform, `operator`) and `member.demo` (demo, `member`), only when `SYNTHWERK_ZITADEL_TEST_USER_PASSWORD` is set.
 
 ## How to use
@@ -49,6 +51,11 @@ updated: 2026-10-23
 | Studio URIs | Exact `http(s)` URIs, comma list, no wildcard. An `http` URI turns on Zitadel dev mode for the app. |
 | Test users | Local and ci only. The password is the `.env` value plus `Aa1!` (complexity policy). Leave the key out on dev and prd. |
 | MFA and the session API | The selftest signs in with a password only and still gets a token: Zitadel enforces "MFA required" in the login UI, not in the session API. The access token has no `amr` claim. Services must not trust MFA from the policy alone (D-47, open task). |
+| Action target network | Zitadel's default deny list blocks every private range, so no container is reachable. `ZITADEL_HTTPCLIENT_DENYLIST` is that list with one hole: identity's fixed address `172.31.250.10` on the internal network `zitadel-hooks` (`172.31.250.0/28`, alias `identity-hooks`). The gateway and Zitadel's own address stay denied. Any port on that address is open to a target, so only IAM owners may create targets. The name `identity` resolves on `app` and stays denied. |
+| Subnet clash | If the host or Docker already uses `172.31.250.0/28`, `up` fails with an address pool error. Change the subnet, identity's `ipv4_address` and the hole in `ZITADEL_HTTPCLIENT_DENYLIST` together. |
+| `::ffff:0:0/96` | Left out of the deny list: in v4.20.0 it matches every IPv4 address, so no IPv4 target works with it. The IPv4 CIDRs still block mapped literals such as `[::ffff:127.0.0.1]` (measured 2026-10-23). |
+| Action caching | Zitadel caches executions and targets: a changed execution or endpoint takes some seconds to apply. Users made in the first seconds after the bootstrap can miss the hook (seen in CI-like runs: 1 of 2 test users). Invites come later, so dev and prd are not affected. |
+| Order | The bootstrap waits for identity: Zitadel resolves the target name when it saves the target. |
 | Scope for org and roles | `openid profile urn:zitadel:iam:org:project:id:<project id>:aud urn:zitadel:iam:org:projects:roles urn:zitadel:iam:user:resourceowner` (`bootstrap.StudioScope`). |
 
 ## Events
@@ -72,6 +79,8 @@ updated: 2026-10-23
 - `tests/zitadel/bootstrap_test.go` — `PUT answers "not changed" - success`
 - `tests/zitadel/bootstrap_test.go` — `client file deleted - new secret, file mode 0600`
 - `tests/zitadel/bootstrap_test.go` — `no test user password - no users; bad PAT - error, no create; wildcard or relative URI - error`
+- `tests/zitadel/bootstrap_test.go` — `identity hook - second run - no target create, no execution change; new URL - target updated; no URL - no target`
+- `tests/stack/stack_test.sh` — `new user - one user.created row in the identity outbox; hook path through the edge - 404; unsigned hook call - 401`
 - `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - both test users get org and role claims; zitadel-login - cannot read the admin PAT`
 
 ## Changes
@@ -79,3 +88,4 @@ updated: 2026-10-23
 | Date | Change |
 |---|---|
 | 2026-10-23 | First version (synthwerk#28 task 2). |
+| 2026-10-23 | Action target for identity, network `zitadel-hooks`, narrowed deny list (synthwerk#28 task 5). |

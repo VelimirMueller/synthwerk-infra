@@ -235,10 +235,19 @@ services:
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: grpc
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_ENDPOINT: telemetry:4317
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_INSECURE: "true"
+      # Action targets (webhooks): Zitadel's default deny list blocks every private
+      # range. This is that list with one hole: identity's fixed address on
+      # zitadel-hooks, 172.31.250.10/32. The gateway (.1) and Zitadel's own address
+      # stay denied. 172.16.0.0/12 is split around the hole. Keep the CIDRs:
+      # the dialer checks resolved IPs with them (DNS rebinding).
+      # "::ffff:0:0/96" from the default list is left out: in v4.20.0 it matches every
+      # IPv4 address, so no IPv4 target works with it. The IPv4 CIDRs above also block
+      # IPv4-mapped literals such as [::ffff:127.0.0.1] (measured 2026-10-23).
+      ZITADEL_HTTPCLIENT_DENYLIST: "localhost,0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/13,172.24.0.0/14,172.28.0.0/15,172.30.0.0/16,172.31.0.0/17,172.31.128.0/18,172.31.192.0/19,172.31.224.0/20,172.31.240.0/21,172.31.248.0/23,172.31.250.0/29,172.31.250.8/31,172.31.250.11/32,172.31.250.12/30,172.31.250.16/28,172.31.250.32/27,172.31.250.64/26,172.31.250.128/25,172.31.251.0/24,172.31.252.0/22,192.168.0.0/16,198.18.0.0/15,::/128,::1/128,fc00::/7,fe80::/10"
     volumes:
       - zitadel-bootstrap:/zitadel/bootstrap
       - zitadel-admin:/zitadel/admin
-    networks: [app, data]
+    networks: [app, data, zitadel-hooks]
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -300,19 +309,27 @@ services:
       SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME: ${SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME:-300s}
       # Local and ci only: empty on dev and prd, so no test user exists there.
       SYNTHWERK_ZITADEL_TEST_USER_PASSWORD: ${SYNTHWERK_ZITADEL_TEST_USER_PASSWORD:-}
+      # Action target for identity (#28 task 5). Zitadel resolves the name when it
+      # saves the target, so identity must be up on zitadel-hooks first.
+      SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: http://identity-hooks:8081/internal/zitadel/actions
+    # CHOWN: the signing key file belongs to identity's nonroot user (65532).
+    cap_add: [CHOWN]
     volumes:
       - zitadel-admin:/zitadel/admin
       - zitadel-bootstrap:/zitadel/bootstrap:ro
+      - zitadel-hooks:/zitadel/hooks
     networks: [app]
     depends_on:
       zitadel:
         condition: service_healthy
+      identity:
+        condition: service_healthy
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity main 4f444a4, pinned by digest.
+  # Image from synthwerk-identity main d03704a (Zitadel hook), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:sha-4f444a4be47b4e1ca60978fd22d7d0d06104724f@sha256:34962d23df48d8ed92be2dc9f4c54da53a5b3714f2b8227f6446422326f67795
+    image: ghcr.io/velimirmueller/synthwerk-identity:sha-d03704ae4e22286c9287d5340eaa80eb92d4b102@sha256:72632d537591dc7583f76cc6c5e3e6c732e7d9dcd5a63ce21c43d200aee38aef
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -320,7 +337,20 @@ services:
       OTEL_SERVICE_NAME: synthwerk-identity
       SYNTHWERK_IDENTITY_HTTP_ADDR: ":8080"
       SYNTHWERK_IDENTITY_DATABASE_URL: postgres://identity:${SYNTHWERK_IDENTITY_DB_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
-    networks: [app, data]
+      # Zitadel Action listener: its own port, reached only on zitadel-hooks.
+      # The edge routes /identity/* to :8080 and never to this port.
+      SYNTHWERK_IDENTITY_HOOKS_ADDR: ":8081"
+      SYNTHWERK_IDENTITY_ZITADEL_SIGNING_KEY_FILE: /zitadel/hooks/identity-signing.key
+    volumes:
+      - zitadel-hooks:/zitadel/hooks:ro
+    networks:
+      app: {}
+      data: {}
+      # Only this alias resolves to the zitadel-hooks address, which the deny list allows.
+      # Fixed: the deny list opens exactly this address.
+      zitadel-hooks:
+        aliases: [identity-hooks]
+        ipv4_address: 172.31.250.10
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -389,6 +419,13 @@ networks:
   # Bus and database. No egress, no published ports.
   data:
     internal: true
+  # Zitadel Action webhooks: Zitadel calls identity here, and nothing else.
+  # Fixed subnet: identity has 172.31.250.10, the one address ZITADEL_HTTPCLIENT_DENYLIST leaves open.
+  zitadel-hooks:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.250.0/28
   # Egress for model downloads (ollama profile only).
   models: {}
 
@@ -400,3 +437,5 @@ volumes:
   # Zitadel login-client PAT. Holds a secret: never copy it out of the stack.
   zitadel-bootstrap: {}
   zitadel-admin: {}
+  # Signing key of the identity Action target. zitadel-bootstrap writes, identity reads.
+  zitadel-hooks: {}

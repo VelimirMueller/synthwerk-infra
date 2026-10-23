@@ -31,9 +31,13 @@ type fake struct {
 	users    map[string]string   // org/user -> id
 	ugrants  map[string][]string // user id -> role keys
 	secrets  int
+	targets  map[string]map[string]any // id -> target
+	execs    map[string][]string       // event -> target ids
 	policies map[string]map[string]any
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
+	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
+	unavailable int
 }
 
 func newFake() *fake {
@@ -41,6 +45,7 @@ func newFake() *fake {
 		orgs: map[string]string{"synthwerk": "o-platform"}, projects: map[string]string{},
 		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
 		users: map[string]string{}, ugrants: map[string][]string{},
+		targets: map[string]map[string]any{}, execs: map[string][]string{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -82,6 +87,12 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	if f.unavailable > 0 {
+		f.unavailable--
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 14, "message": "connection error"})
+		return
+	}
 	if r.Host != "auth.test" || r.Header.Get("Authorization") != "Bearer pat" {
 		http.Error(w, `{"code":16,"message":"unauthenticated"}`, http.StatusUnauthorized)
 		return
@@ -155,6 +166,37 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if m[2] == "grants" && r.Method == http.MethodPost {
 			f.ugrants[m[1]] = strSlice(in["roleKeys"])
 		}
+		reply(map[string]any{})
+	case p == "/v2/actions/targets/search":
+		var items []any
+		for _, t := range f.targets {
+			items = append(items, t)
+		}
+		reply(map[string]any{"targets": items})
+	case p == "/v2/actions/targets":
+		id := f.id("t")
+		in["id"], in["signingKey"] = id, "key-"+id
+		f.targets[id] = in
+		reply(map[string]any{"id": id, "signingKey": "key-" + id})
+	case strings.HasPrefix(p, "/v2/actions/targets/"):
+		id := strings.TrimPrefix(p, "/v2/actions/targets/")
+		if f.targets[id] == nil {
+			w.WriteHeader(http.StatusNotFound)
+			reply(map[string]any{"code": 5, "message": "target not found"})
+			return
+		}
+		in["id"], in["signingKey"] = id, f.targets[id]["signingKey"]
+		f.targets[id] = in
+		reply(map[string]any{})
+	case p == "/v2/actions/executions/search":
+		var items []any
+		for ev, ids := range f.execs {
+			items = append(items, map[string]any{"condition": map[string]any{"event": map[string]any{"event": ev}}, "targets": ids})
+		}
+		reply(map[string]any{"executions": items})
+	case p == "/v2/actions/executions":
+		ev := in["condition"].(map[string]any)["event"].(map[string]any)["event"].(string)
+		f.execs[ev] = strSlice(in["targets"])
 		reply(map[string]any{})
 	case p == "/admin/v1/policies/password/complexity", p == "/admin/v1/policies/password/lockout":
 		if r.Method == http.MethodPut {
@@ -391,6 +433,14 @@ func TestWrongOrgPATFails(t *testing.T) {
 }
 
 func TestConfigRejectsWildcardAndRelativeURIs(t *testing.T) {
+	if _, err := bootstrap.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL" {
+			return "identity-hooks:8081/x"
+		}
+		return ""
+	}); err == nil {
+		t.Error("hook URL without scheme: want an error")
+	}
 	for _, uri := range []string{"https://*.example.com/cb", "/callback", "javascript:alert(1)", " , "} {
 		_, err := bootstrap.ConfigFromEnv(func(k string) string {
 			if k == "SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS" {
@@ -417,5 +467,74 @@ func TestCheckRoles(t *testing.T) {
 	}
 	if err := bootstrap.CheckRoles(claims, "o-2", "member"); err == nil {
 		t.Error("other org: want an error")
+	}
+}
+
+func hookSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
+	t.Helper()
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL": "http://identity-hooks:8081/internal/zitadel/actions"})
+	cfg.IdentityHookKeyFile = filepath.Join(t.TempDir(), "identity-signing.key")
+	cfg.IdentityHookKeyOwner = os.Getuid() // tests run unprivileged
+	return f, c, cfg
+}
+
+func TestIdentityHookIsSetUpOnce(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	if len(f.targets) != 1 {
+		t.Fatalf("targets %d, want 1", len(f.targets))
+	}
+	var id string
+	for k := range f.targets {
+		id = k
+	}
+	if got := f.execs["user.human.added"]; len(got) != 1 || got[0] != id {
+		t.Errorf("execution user.human.added -> %v, want [%s]", got, id)
+	}
+	key, err := os.ReadFile(cfg.IdentityHookKeyFile)
+	if err != nil || string(key) != "key-"+id {
+		t.Fatalf("key file %q, %v", key, err)
+	}
+	if st, _ := os.Stat(cfg.IdentityHookKeyFile); st.Mode().Perm() != 0o400 {
+		t.Errorf("key file mode %v, want 0400", st.Mode().Perm())
+	}
+	f.calls = nil
+	run(t, c, cfg)
+	for _, call := range f.calls {
+		if call == "POST /v2/actions/targets" || call == "PUT /v2/actions/executions" || strings.HasPrefix(call, "POST /v2/actions/targets/"+id) {
+			t.Errorf("second run changed the hook: %s", call)
+		}
+	}
+}
+
+func TestIdentityHookFollowsANewURL(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	cfg.IdentityHookURL = "http://identity-hooks:9091/internal/zitadel/actions"
+	run(t, c, cfg)
+	if len(f.targets) != 1 {
+		t.Fatalf("targets %d, want 1 (update, not a second target)", len(f.targets))
+	}
+	for _, tg := range f.targets {
+		if tg["endpoint"] != cfg.IdentityHookURL {
+			t.Errorf("endpoint %v", tg["endpoint"])
+		}
+	}
+}
+
+func TestNoIdentityHookWithoutURL(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	if len(f.targets) != 0 || len(f.execs) != 0 {
+		t.Errorf("targets %d, executions %d without SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL", len(f.targets), len(f.execs))
+	}
+}
+
+func TestWaitsForAStartingZitadel(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	f.unavailable = 1
+	run(t, c, cfg)
+	if f.calls[0] != "GET /management/v1/orgs/me" || f.calls[1] != "GET /management/v1/orgs/me" {
+		t.Errorf("want the first read repeated, got %v", f.calls[:2])
 	}
 }
