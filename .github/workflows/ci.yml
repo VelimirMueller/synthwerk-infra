@@ -1,89 +1,143 @@
-# Thin caller of the synthwerk blueprint for the Go WAF, plus the shell job
-# (bash -n, shellcheck) and the stack job: start the compose stack, wait for every
-# health check, run the edge tests.
-# Required checks for the ruleset: "ci / required" (blueprint jobs) and "gate" (all jobs).
+# Fleet standard ci.yml (fleet-standard templates/deploys/public) for the Go WAF and the zitadel
+# bootstrap, plus the stack job: shellcheck, the whole compose stack on one runner, the edge tests.
+# The stack job is an exception (fleet.yml WF-NAME-02): no fleet stage starts a compose stack.
+# Required check for the ruleset: "conclusion".
 name: ci
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    branches: [develop, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: Run the e2e stage
+        type: boolean
+        default: false
 
 permissions: {}
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 defaults:
   run:
-    shell: bash --noprofile --norc -euo pipefail {0}
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.event.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Blueprint: gofmt, golangci-lint, go test -race, go build (waf/, cmd/waf, tests/waf).
-  ci:
+  changes:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
-    uses: VelimirMueller/synthwerk-blueprint/.github/workflows/go-ci.yml@v1
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+    steps:
+      - name: Detect code changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+              - '!.github/ISSUE_TEMPLATE/**'
 
-  # Local: the whole stack on one runner. Every service must turn healthy.
+  # gofmt, go vet, golangci-lint (.golangci.yml), actionlint, zizmor.
+  lint:
+    needs: changes
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.code == 'true' }}
+    permissions:
+      contents: read
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_ci-lint.yml@v0.0.1
+    with:
+      stack: go
+
+  # The tests live in tests/, so the coverage counts the waf and zitadel packages (-coverpkg).
+  # cmd/ holds only the main functions. Floor 70: the tests cover 70.8 % today; CI-UNIT-03 wants 80.
+  unit:
+    needs: [changes, lint]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.code == 'true' }}
+    permissions:
+      contents: read
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_ci-unit.yml@v0.0.1
+    with:
+      stack: go
+      command: go test -race -covermode=atomic -coverpkg=./waf/...,./zitadel/... -coverprofile=coverage/cover.out ./...
+      coverage-floor: 70
+
+  # The stack test as JUnit (tests/stack/e2e.sh). The stack job runs the same test on every PR.
+  e2e:
+    needs: [changes, unit]
+    if: ${{ !failure() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.e2e }}
+    permissions:
+      contents: read
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_ci-e2e.yml@v0.0.1
+    with:
+      stack: go
+      command: tests/stack/e2e.sh
+
+  build:
+    needs: [changes, e2e]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.code == 'true' }}
+    permissions:
+      contents: read
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_ci-build.yml@v0.0.1
+    with:
+      stack: go
+
+  # Every service of the compose stack must turn healthy; then the edge tests run.
   stack:
+    needs: [changes, lint]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Write .env with generated dev passwords
-        run: scripts/init-env.sh
-      - name: Validate compose (default and ollama profile)
+      - name: Check the shell scripts with bash and shellcheck
         run: |
+          git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+          git ls-files -z '*.sh' | xargs -0 -r shellcheck --severity=warning
+      - name: Validate the compose files
+        run: |
+          scripts/init-env.sh
           docker compose config --quiet
           docker compose --profile ollama config --quiet
-      - name: Start the stack and wait for every health check
-        run: docker compose up --build --wait --wait-timeout 300
-      - name: Stack status
-        if: always()
-        run: docker compose ps --all
-      - name: Stack test (health, WAF, limits, fail closed)
-        run: tests/stack/stack_test.sh
-      - name: Logs on failure
-        if: failure()
-        run: docker compose logs --no-color --tail 200
-      - name: Stop the stack
-        if: always()
-        run: docker compose down --volumes
+      - name: Run the stack test against the whole compose stack
+        run: tests/stack/e2e.sh
 
-  # Local: syntax check and shellcheck on every tracked shell script.
-  shell:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: bash -n (syntax)
-        run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
-      - name: shellcheck (severity warning)
-        run: git ls-files -z '*.sh' | xargs -0 -r shellcheck --severity=warning
-
-  # One check over the blueprint and the local jobs ("ci / required" covers the blueprint only).
-  gate:
+  conclusion:
+    needs: [changes, lint, unit, e2e, build, stack]
     if: always()
-    needs: [ci, shell, stack]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: All jobs passed
+      - name: Fail when a job failed or a required stage was skipped
         env:
+          CODE: ${{ needs.changes.outputs.code }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          LINT: ${{ needs.lint.result }}
+          UNIT: ${{ needs.unit.result }}
+          BUILD: ${{ needs.build.result }}
+          STACK: ${{ needs.stack.result }}
         run: |
-          echo "Results: $RESULTS"
-          for result in $RESULTS; do
-            [[ "$result" == "success" ]] || exit 1
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "::error::a job ended as $r"; exit 1 ;; esac
           done
+          if [ "$CODE" = "true" ]; then
+            for r in "$LINT" "$UNIT" "$BUILD" "$STACK"; do
+              [ "$r" = "success" ] || { echo "::error::a required stage did not run"; exit 1; }
+            done
+          fi
