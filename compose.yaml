@@ -312,6 +312,10 @@ services:
       # Action target for identity (#28 task 5). Zitadel resolves the name when it
       # saves the target, so identity must be up on zitadel-hooks first.
       SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: http://identity-hooks:8081/internal/zitadel/actions
+      # Mail (invite codes, email verification) goes to Mailpit in local and ci (D-49).
+      # Dev and prd set this to empty and keep their provider (Resend) out of the bootstrap.
+      SYNTHWERK_ZITADEL_SMTP_HOST: ${SYNTHWERK_ZITADEL_SMTP_HOST-mailpit:1025}
+      SYNTHWERK_ZITADEL_SMTP_SENDER: ${SYNTHWERK_ZITADEL_SMTP_SENDER:-auth@synthwerk.localhost}
     # CHOWN: the signing key file belongs to identity's nonroot user (65532).
     cap_add: [CHOWN]
     volumes:
@@ -324,6 +328,29 @@ services:
         condition: service_healthy
       identity:
         condition: service_healthy
+
+  # Mailpit: catches every mail Zitadel sends in local and ci (D-49). Web UI and API
+  # on http://127.0.0.1:8025 (GET /api/v1/messages). The bootstrap does not wait for
+  # it: Zitadel queues mail and retries. A dev or prd override must drop this
+  # service and set SYNTHWERK_ZITADEL_SMTP_HOST= (empty); mail there goes through Resend.
+  mailpit:
+    <<: *hardening
+    image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    read_only: true
+    cap_drop: [ALL]
+    # Mailpit keeps its message database in /tmp; the root file system stays read-only.
+    tmpfs: [/tmp]
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:${SYNTHWERK_MAILPIT_UI_PORT:-8025}:8025"
+    # "edge" only for the published UI port; Zitadel sends on "app".
+    networks: [app, edge]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/mailpit", "readyz"]
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
   # Image from synthwerk-identity main d03704a (Zitadel hook), pinned by digest.
