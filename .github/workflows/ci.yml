@@ -2,6 +2,8 @@
 # bootstrap, plus the stack job: shellcheck, the whole compose stack on one runner, the edge tests.
 # The stack job is an exception (fleet.yml WF-NAME-02): no fleet stage starts a compose stack.
 # Required check for the ruleset: "conclusion".
+# No push trigger (CI-COST-05): the main ruleset requires "conclusion", so a change reaches main
+# through a PR run of this workflow.
 name: ci
 
 on:
@@ -36,6 +38,9 @@ jobs:
     outputs:
       code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
     steps:
+      # Only negated patterns, so predicate-quantifier must be `every`: paths-filter applies it per
+      # file. A file is code when it matches every pattern (it is not docs); code=true when any
+      # changed file is code. A .go-only PR gives code=true, a README-only PR gives code=false.
       - name: Detect code changes
         id: filter
         if: github.event_name == 'pull_request'
@@ -73,6 +78,8 @@ jobs:
       coverage-floor: 70
 
   # The stack test as JUnit (tests/stack/e2e.sh). The stack job runs the same test on every PR.
+  # e2e runs on dispatch and in promote.yml before stg (CI-E2E-01); a PR runs the same suite
+  # in the extra job below. build needs e2e only so a dispatched e2e failure stops the build.
   e2e:
     needs: [changes, unit]
     if: ${{ !failure() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.e2e }}
@@ -118,6 +125,8 @@ jobs:
       - name: Run the stack test against the whole compose stack
         run: tests/stack/e2e.sh
 
+  # The one required check. `skipped` passes only for e2e (dispatch only) and for a docs-only run
+  # (code=false). With code=true every listed stage must be `success`; a skipped one fails here.
   conclusion:
     needs: [changes, lint, unit, e2e, build, stack]
     if: always()

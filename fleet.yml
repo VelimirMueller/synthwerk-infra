@@ -22,7 +22,7 @@ exceptions:
     reason: develop does not exist yet; the control repo creates it with its ruleset (fleet-standard#7).
   - rule: GOV-RS-04
     value: not-created-yet
-    reason: stage does not exist yet and the main ruleset still requires the old gate check; the control repo sets both (fleet-standard#7).
+    reason: stage does not exist yet, and the main ruleset holds only the required check "conclusion" (set 2026-10-28); the control repo creates both full rulesets (fleet-standard#7).
   - rule: GOV-ENV-01
     value: not-created-yet
     reason: The environments dev, stg and prd do not exist yet; the control repo creates them (fleet-standard#7).

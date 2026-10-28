@@ -45,7 +45,7 @@ while IFS= read -r line; do
   esac
   total=$((total + 1))
   name=$(xml_escape "$name")
-  if [[ "$line" == FAIL* ]]; then
+  if [[ "$line" == "FAIL "* ]]; then
     failed=$((failed + 1))
     cases+="    <testcase classname=\"stack\" name=\"$name\"><failure message=\"check failed\"/></testcase>"$'\n'
   else

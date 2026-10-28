@@ -79,6 +79,9 @@ jobs:
       - name: Record the stg approval
         run: echo "stg promotion approved"
 
+  # prd needs no e2e here: preflight lets prd take only the SHA that stage holds and that a green
+  # promote.yml stg run (with its e2e job) deployed. promote-* need their gate job: a skipped gate
+  # skips the promotion.
   gate-prd:
     needs: [setup, preflight]
     if: needs.setup.outputs.env == 'prd'
