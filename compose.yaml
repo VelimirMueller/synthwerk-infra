@@ -355,10 +355,10 @@ services:
       test: ["CMD", "/mailpit", "readyz"]
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity main d03704a (Zitadel hook), pinned by digest.
+  # Image from synthwerk-identity main 9fba3fd (orgs and roles, synthwerk#29), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:sha-d03704ae4e22286c9287d5340eaa80eb92d4b102@sha256:72632d537591dc7583f76cc6c5e3e6c732e7d9dcd5a63ce21c43d200aee38aef
+    image: ghcr.io/velimirmueller/synthwerk-identity:sha-9fba3fd81729f6466eacd3d55c321dc2fb4e63b7@sha256:38a95f585ef964f14bb92853074f8a4b159107dc08e7483b6020b372cac3c2cc
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -370,6 +370,20 @@ services:
       # The edge routes /identity/* to :8080 and never to this port.
       SYNTHWERK_IDENTITY_HOOKS_ADDR: ":8081"
       SYNTHWERK_IDENTITY_ZITADEL_SIGNING_KEY_FILE: /zitadel/hooks/identity-signing.key
+      # Org roles (synthwerk#29). Token check like llm: Zitadel by default; the stack
+      # test points these at its own issuer (tests/stack/issuer.sh).
+      SYNTHWERK_IDENTITY_OIDC_ISSUER: ${SYNTHWERK_IDENTITY_OIDC_ISSUER:-http://auth.localhost:8080}
+      SYNTHWERK_IDENTITY_OIDC_AUDIENCE: ${SYNTHWERK_IDENTITY_OIDC_AUDIENCE:-synthwerk-api}
+      SYNTHWERK_IDENTITY_JWKS_URL: ${SYNTHWERK_IDENTITY_JWKS_URL:-}
+      # Zitadel org that grants operator. Empty = nobody is operator in identity.
+      SYNTHWERK_IDENTITY_PLATFORM_ORG_ID: ${SYNTHWERK_IDENTITY_PLATFORM_ORG_ID:-}
+      # Role changes go to the Zitadel user grant as the machine user identity-sync.
+      # zitadel-bootstrap writes its PAT; identity reads it per call.
+      SYNTHWERK_IDENTITY_ZITADEL_API_URL: http://zitadel:8080
+      SYNTHWERK_IDENTITY_ZITADEL_HOST: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
+      SYNTHWERK_IDENTITY_ZITADEL_PAT_FILE: /zitadel/hooks/identity.pat
+      # org.created and member.role_changed go from the outbox to EVT_IDENTITY.
+      SYNTHWERK_IDENTITY_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
     volumes:
       - zitadel-hooks:/zitadel/hooks:ro
     networks:
@@ -383,6 +397,8 @@ services:
     depends_on:
       database-init:
         condition: service_completed_successfully
+      bus:
+        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/identity", "healthcheck"]
@@ -494,5 +510,6 @@ volumes:
   # Zitadel login-client PAT. Holds a secret: never copy it out of the stack.
   zitadel-bootstrap: {}
   zitadel-admin: {}
-  # Signing key of the identity Action target. zitadel-bootstrap writes, identity reads.
+  # Signing key of the identity Action target and the identity-sync PAT (synthwerk#29).
+  # zitadel-bootstrap writes, identity reads.
   zitadel-hooks: {}

@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/VelimirMueller/synthwerk-infra/zitadel/bootstrap"
 )
@@ -35,6 +39,10 @@ type fake struct {
 	execs    map[string][]string       // event -> target ids
 	policies map[string]map[string]any
 	smtp     map[string]map[string]any // id -> provider
+	members  map[string][]string       // instance member user id -> roles
+	gmembers map[string][]string       // project grant id/user id -> roles
+	pats     map[string]string         // user id/token id of live PATs -> expiration date
+	patN     int
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
 	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
@@ -47,7 +55,8 @@ func newFake() *fake {
 		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{},
-		smtp: map[string]map[string]any{},
+		smtp: map[string]map[string]any{}, members: map[string][]string{},
+		gmembers: map[string][]string{}, pats: map[string]string{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -83,6 +92,9 @@ var (
 	reProject = regexp.MustCompile(`^/management/v1/projects/([^/]+)$`)
 	reSub     = regexp.MustCompile(`^/management/v1/projects/[^/]+/(roles|grants|apps)(/.*)?$`)
 	reUser    = regexp.MustCompile(`^/management/v1/users/([^/]+)/(password|grants)(/.*)?$`)
+	rePAT     = regexp.MustCompile(`^/management/v1/users/([^/]+)/pats(/.*)?$`)
+	// reGrantMember is checked before reSub: members of a project grant.
+	reGrantMember = regexp.MustCompile(`^/management/v1/projects/[^/]+/grants/([^/]+)/members/?([^/]*)$`)
 )
 
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +155,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"id": id})
 	case reProject.MatchString(p) && r.Method == http.MethodPut:
 		reply(map[string]any{})
-	case reSub.MatchString(p):
+	case reSub.MatchString(p) && !reGrantMember.MatchString(p):
 		f.project(w, r.Method, p, in, reply, result)
 	case p == "/management/v1/users/_search":
 		var items []map[string]any
@@ -151,6 +163,62 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			items = append(items, map[string]any{"id": id})
 		}
 		result(items)
+	case p == "/management/v1/users/machine":
+		id := f.id("m")
+		f.users[org+"/"+in["userName"].(string)] = id
+		reply(map[string]any{"userId": id})
+	case strings.HasPrefix(p, "/admin/v1/members/") && r.Method == http.MethodDelete:
+		uid := strings.TrimPrefix(p, "/admin/v1/members/")
+		if f.members[uid] == nil {
+			w.WriteHeader(http.StatusNotFound)
+			reply(map[string]any{"code": 5, "message": "member not found"})
+			return
+		}
+		delete(f.members, uid)
+		reply(map[string]any{})
+	case reGrantMember.MatchString(p):
+		m := reGrantMember.FindStringSubmatch(p)
+		uid := m[2]
+		if uid == "" {
+			uid = in["userId"].(string)
+			if f.gmembers[m[1]+"/"+uid] != nil && r.Method == http.MethodPost {
+				// Zitadel v4.20 answers a second grant member with 404, code 5.
+				w.WriteHeader(http.StatusNotFound)
+				reply(map[string]any{"code": 5, "message": "Errors.AlreadyExists (PROJECT-37fug)"})
+				return
+			}
+		}
+		f.gmembers[m[1]+"/"+uid] = strSlice(in["roles"])
+		reply(map[string]any{})
+	case rePAT.MatchString(p):
+		m := rePAT.FindStringSubmatch(p)
+		switch {
+		case m[2] == "/_search":
+			var items []map[string]any
+			for _, k := range slices.Sorted(maps.Keys(f.pats)) {
+				if strings.HasPrefix(k, m[1]+"/") {
+					items = append(items, map[string]any{"id": strings.TrimPrefix(k, m[1]+"/"), "expirationDate": f.pats[k]})
+				}
+			}
+			// The query pages like Zitadel: offset (a string) and limit.
+			q, _ := in["query"].(map[string]any)
+			off, _ := strconv.Atoi(fmt.Sprint(q["offset"]))
+			limit, _ := q["limit"].(float64)
+			if limit == 0 || limit > 100 {
+				limit = 100
+			}
+			items = items[min(off, len(items)):min(off+int(limit), len(items))]
+			result(items)
+		case r.Method == http.MethodDelete:
+			delete(f.pats, m[1]+m[2]) // m[2] is "/<token id>"
+			reply(map[string]any{})
+		default:
+			f.patN++
+			tid := fmt.Sprintf("tok-%d", f.patN)
+			exp, _ := in["expirationDate"].(string)
+			f.pats[m[1]+"/"+tid] = exp
+			reply(map[string]any{"tokenId": tid, "token": fmt.Sprintf("pat-%d", f.patN)})
+		}
 	case p == "/management/v1/users/human/_import":
 		id := f.id("u")
 		f.users[org+"/"+in["userName"].(string)] = id
@@ -500,7 +568,145 @@ func hookSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
 	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL": "http://identity-hooks:8081/internal/zitadel/actions"})
 	cfg.IdentityHookKeyFile = filepath.Join(t.TempDir(), "identity-signing.key")
 	cfg.IdentityHookKeyOwner = os.Getuid() // tests run unprivileged
+	cfg.IdentityPATFile = filepath.Join(t.TempDir(), "identity.pat")
 	return f, c, cfg
+}
+
+func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	r := run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	if id == "" {
+		t.Fatal("no machine user identity-sync")
+	}
+	if f.members[id] != nil {
+		t.Errorf("identity-sync has instance roles %v, want none", f.members[id])
+	}
+	if got := f.gmembers[r.DemoGrantID+"/"+id]; !slices.Equal(got, bootstrap.IdentitySyncGrantRoles) {
+		t.Errorf("roles on the demo project grant %v, want %v", got, bootstrap.IdentitySyncGrantRoles)
+	}
+	pat, err := os.ReadFile(cfg.IdentityPATFile)
+	if err != nil || string(pat) != "pat-1" {
+		t.Fatalf("pat file %q, %v", pat, err)
+	}
+	if st, _ := os.Stat(cfg.IdentityPATFile); st.Mode().Perm() != 0o400 {
+		t.Errorf("pat file mode %v, want 0400", st.Mode().Perm())
+	}
+	run(t, c, cfg)
+	if f.patN != 1 {
+		t.Errorf("second run made %d PATs, want 1 in total", f.patN)
+	}
+	for _, ev := range []string{"user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"} {
+		if len(f.execs[ev]) != 1 {
+			t.Errorf("no execution for %s", ev)
+		}
+	}
+}
+
+func TestIdentitySyncNewPATRevokesOldOnes(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	f.members[id] = []string{"IAM_USER_MANAGER"} // made by an older bootstrap
+	// The file is gone (new volume): a new PAT, and the old one is revoked.
+	if err := os.Remove(cfg.IdentityPATFile); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, cfg)
+	if len(f.pats) != 1 || f.pats[id+"/tok-2"] == "" {
+		t.Errorf("live PATs %v, want only tok-2", f.pats)
+	}
+	if f.members[id] != nil {
+		t.Errorf("old instance role kept: %v", f.members[id])
+	}
+}
+
+func TestIdentityPATRenewedNearExpiry(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	// A rerun with a fresh PAT keeps it.
+	run(t, c, cfg)
+	if len(f.pats) != 1 || f.pats[id+"/tok-1"] == "" {
+		t.Fatalf("fresh PAT replaced: %v", f.pats)
+	}
+	// The PAT ends in a day (under a third of its lifetime): the rerun mints a new one
+	// and revokes the old one.
+	f.pats[id+"/tok-1"] = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	run(t, c, cfg)
+	if len(f.pats) != 1 || f.pats[id+"/tok-2"] == "" {
+		t.Fatalf("live PATs %v, want only tok-2", f.pats)
+	}
+	got, err := os.ReadFile(cfg.IdentityPATFile)
+	if err != nil || string(got) != "pat-2" {
+		t.Fatalf("PAT file %q, %v: want pat-2", got, err)
+	}
+}
+
+func TestIdentityPATRunTwiceOneActive(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	got, err := os.ReadFile(cfg.IdentityPATFile + ".id")
+	if err != nil || len(f.pats) != 1 || f.pats[id+"/"+string(got)] == "" {
+		t.Fatalf("live PATs %v, id file %q (%v): want one, the one in the file", f.pats, got, err)
+	}
+}
+
+func TestIdentityPATRevokesLeftoversOnEveryRun(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	// An earlier run failed to revoke: 150 old PATs, more than one search page.
+	exp := time.Now().Add(240 * time.Hour).UTC().Format(time.RFC3339)
+	for i := range 150 {
+		f.pats[fmt.Sprintf("%s/old-%03d", id, i)] = exp
+	}
+	run(t, c, cfg) // the file is there and fresh: no new PAT, but the leftovers go
+	if len(f.pats) != 1 || f.pats[id+"/tok-1"] == "" {
+		t.Fatalf("%d live PATs, want only tok-1", len(f.pats))
+	}
+}
+
+func TestIdentityPATWriteFailureDeletesTheNewPAT(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	// The id file cannot be written: a non-empty directory sits at its path.
+	if err := os.MkdirAll(cfg.IdentityPATFile+".id/x", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bootstrap.Run(context.Background(), c, cfg, slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("run passed, want the write error")
+	}
+	if len(f.pats) != 0 {
+		t.Fatalf("live PATs %v after a failed write, want none", f.pats)
+	}
+}
+
+func TestIdentityPATLifetime(t *testing.T) {
+	cfg, err := bootstrap.ConfigFromEnv(func(string) string { return "" })
+	if err != nil || cfg.IdentityPATLifetime != 30*24*time.Hour {
+		t.Fatalf("default %v, %v", cfg.IdentityPATLifetime, err)
+	}
+	if _, err := bootstrap.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME" {
+			return "1m"
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("1m accepted")
+	}
+}
+
+func TestDemoOrgMayGrantOwner(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_TEST_USER_PASSWORD": "Test-Password-1!"})
+	r := run(t, c, cfg)
+	if !slices.Contains(f.grants[r.DemoOrgID], "owner") || slices.Contains(f.grants[r.DemoOrgID], "operator") {
+		t.Fatalf("demo grant %v: want owner, not operator", f.grants[r.DemoOrgID])
+	}
+	if id := r.TestUserIDs["owner.demo"]; id == "" || !slices.Equal(f.ugrants[id], []string{"owner"}) {
+		t.Fatalf("owner.demo %q grants %v", id, f.ugrants[id])
+	}
 }
 
 func TestIdentityHookIsSetUpOnce(t *testing.T) {

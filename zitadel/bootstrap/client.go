@@ -45,9 +45,22 @@ func (e *APIError) Error() string {
 }
 
 // IsAlreadyExists is true for "already exists" answers (gRPC code 6, HTTP 409).
+// Some Zitadel v4 endpoints (project grant members) answer it with 404, code 5
+// and the message key Errors.AlreadyExists.
 func IsAlreadyExists(err error) bool {
 	var e *APIError
-	return errors.As(err, &e) && (e.Code == 6 || e.Status == http.StatusConflict)
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code == 6 || e.Status == http.StatusConflict ||
+		((e.Code == 5 || e.Status == http.StatusNotFound) && strings.Contains(e.Message, "Errors.AlreadyExists"))
+}
+
+// IsNotFound is true for "not found" answers (gRPC code 5, HTTP 404).
+func IsNotFound(err error) bool {
+	var e *APIError
+	return errors.As(err, &e) && (e.Code == 5 || e.Status == http.StatusNotFound) &&
+		!strings.Contains(e.Message, "Errors.AlreadyExists")
 }
 
 // IsNotChanged is true when an update had nothing to change. Some Zitadel

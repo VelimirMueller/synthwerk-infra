@@ -76,7 +76,7 @@ echo "# Zitadel setup as code (zitadel/bootstrap)"
 if out=$(docker compose run --rm --no-deps zitadel-bootstrap 2>&1); then pass "zitadel-bootstrap rerun exits 0"; else fail "zitadel-bootstrap rerun: $(grep -o '"err":"[^"]*"' <<<"$out" || echo "$out" | tail -n 3)"; fi
 # Signs both test users in without a browser and checks org and roles in the token.
 out=$(docker compose run --rm --no-deps zitadel-bootstrap selftest 2>&1 || true)
-if [[ $(grep -c '"msg":"selftest ok"' <<<"$out") == 2 ]]; then pass "selftest: token claims carry org and role"; else fail "selftest: $(grep -o '"err":"[^"]*"' <<<"$out" || echo no output)"; fi
+if [[ $(grep -c '"msg":"selftest ok"' <<<"$out") == 3 ]]; then pass "selftest: token claims carry org and role"; else fail "selftest: $(grep -o '"err":"[^"]*"' <<<"$out" || echo no output)"; fi
 # The login UI must not see the IAM owner token.
 out=$(docker compose exec -T zitadel-login sh -c 'test -e /zitadel/admin && echo present || echo absent' 2>&1 || true)
 if [[ "$out" == "absent" ]]; then pass "zitadel-login cannot read the admin PAT"; else fail "zitadel-login sees /zitadel/admin: $out"; fi
@@ -220,6 +220,118 @@ if tests/stack/issuer.sh active; then
   if grep -qE 'one two three|alert\(1\)|no token|forged' <<<"$logs"; then fail "llm logs hold prompt or answer text"; else pass "llm logs hold no prompt or answer text"; fi
 else
   echo "skip: llm does not trust the stack test issuer (run tests/stack/issuer.sh setup before compose up)"
+fi
+
+echo "# org roles: owner changes a role, a member gets 403 (synthwerk#29)"
+# The test makes its own org, project grant, two users and their grants: grants made
+# by the bootstrap can miss the Action cache (see the user.created check above).
+if tests/stack/issuer.sh active; then
+  # zapi <method> <path> <org id or -> [json]: Zitadel API as the IAM owner, inside the stack.
+  zapi() {
+    local org_hdr=""
+    [[ "$3" != "-" ]] && org_hdr="-H 'x-zitadel-orgid: $3'"
+    docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+      curlimages/curl:8.17.0 -c "curl -s -X $1 -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+      -H 'Content-Type: application/json' $org_hdr http://zitadel:8080$2 ${4:+-d '$4'}" || true
+  }
+  isql() {
+    docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc "$1" 2>/dev/null || echo error
+  }
+  # first_id <key>: the first "<key>": "<digits>" value on stdin, or nothing.
+  first_id() { { grep -oE "\"$1\": *\"[0-9]+\"" || true; } | head -n 1 | tr -d ' ' | cut -d'"' -f4; }
+  project=$(docker run --rm -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint cat curlimages/curl:8.17.0 /b/studio-client.json | first_id project_id)
+  zorg=$(zapi POST /management/v1/orgs - "{\"name\":\"Roles Stack $$\"}" | first_id id)
+  pgrant=$(zapi POST "/management/v1/projects/$project/grants" - "{\"grantedOrgId\":\"$zorg\",\"roleKeys\":[\"owner\",\"admin\",\"member\"]}" | first_id grantId)
+  # identity-sync may write the grants of an org only with PROJECT_GRANT_OWNER on its
+  # project grant (ADR-0003): whoever makes a project grant adds it.
+  platform=$(zapi GET /management/v1/orgs/me - | first_id id)
+  sync_id=$(zapi POST /management/v1/users/_search "$platform" \
+    '{"queries":[{"userNameQuery":{"userName":"identity-sync","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
+  zapi POST "/management/v1/projects/$project/grants/$pgrant/members" - "{\"userId\":\"$sync_id\",\"roles\":[\"PROJECT_GRANT_OWNER\"]}" >/dev/null
+  iam=$(zapi POST /admin/v1/members/_search - '{}')
+  if [[ -n "$sync_id" && "$iam" != *"$sync_id"* ]]; then pass "identity-sync has no instance role"; else fail "identity-sync '${sync_id:-missing}' is an instance member"; fi
+  # After two bootstrap runs identity-sync has one live PAT: the one whose id is in the file.
+  pats=$(zapi POST "/management/v1/users/$sync_id/pats/_search" "$platform" '{}' | { grep -oE '"id": *"[0-9]+"' || true; } | tr -d ' ' | cut -d'"' -f4)
+  pat_id=$(docker run --rm -v synthwerk_zitadel-hooks:/h:ro --entrypoint cat curlimages/curl:8.17.0 /h/identity.pat.id 2>/dev/null)
+  if [[ -n "$pat_id" && "$pats" == "$pat_id" ]]; then pass "identity-sync has one live PAT, the one in the file"; else fail "identity-sync PATs '$pats', file id '$pat_id'"; fi
+  # mkuser <name> <role>: a user in the test org with one grant; prints the user id.
+  mkuser() {
+    local id
+    id=$(zapi POST /management/v1/users/human/_import "$zorg" \
+      "{\"userName\":\"$1.$$\",\"profile\":{\"firstName\":\"Roles\",\"lastName\":\"Stack\"},\"email\":{\"email\":\"$1.$$@example.test\",\"isEmailVerified\":true}}" | first_id userId)
+    [[ -n "$id" ]] && zapi POST "/management/v1/users/$id/grants" "$zorg" \
+      "{\"projectId\":\"$project\",\"projectGrantId\":\"$pgrant\",\"roleKeys\":[\"$2\"]}" >/dev/null
+    echo "$id"
+  }
+  owner_id=$(mkuser roles.owner owner)
+  member_id=$(mkuser roles.member member)
+  org_id=""
+  for _ in $(seq 1 30); do
+    [[ -z "$owner_id" || -z "$member_id" ]] && break
+    org_id=$(isql "SELECT o.id FROM identity.orgs o WHERE o.zitadel_org_id = '$zorg' AND o.status = 'active'
+      AND (SELECT count(*) FROM identity.memberships m WHERE m.org_id = o.id) = 2")
+    [[ "$org_id" =~ ^[0-9a-f-]{36}$ ]] && break
+    org_id=""
+    sleep 3
+  done
+  if [[ -n "$org_id" ]]; then pass "grants of a new org reach identity: org $org_id active with 2 members"; else fail "org '$zorg' (project '$project', grant '$pgrant', users '$owner_id' '$member_id') not mirrored as active with 2 members"; fi
+  slug=$(isql "SELECT slug FROM identity.orgs WHERE id = '$org_id'")
+  # identity reads the org name from the grant since synthwerk-identity#12; older images fall back to org-<id>.
+  if [[ "$slug" == "roles-stack-$$" || "$slug" == org-* ]]; then pass "org has a slug: $slug"; else fail "slug '$slug', want roles-stack-$$ or org-<id>"; fi
+  rows=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'type' = 'dev.synthwerk.identity.org.created.v1' AND event->>'subject' = '$org_id'")
+  if [[ "$rows" == 1 ]]; then pass "one org.created for the new org"; else fail "org.created rows: $rows, want 1"; fi
+  tok_owner=$(tests/stack/issuer.sh mint "$owner_id" "$zorg" owner)
+  tok_member=$(tests/stack/issuer.sh mint "$member_id" "$zorg" member)
+  members="$EDGE/identity/v1/orgs/$org_id/members"
+  expect_status "member changes a role: 403" 403 -X PATCH -H "Authorization: Bearer $tok_member" \
+    -H 'Content-Type: application/json' --data '{"role":"admin"}' "$members/$owner_id"
+  expect_status "member lists members: 403" 403 -H "Authorization: Bearer $tok_member" "$members"
+  expect_status "owner promotes the member to admin: 200" 200 -X PATCH -H "Authorization: Bearer $tok_owner" \
+    -H 'Content-Type: application/json' --data '{"role":"admin"}' "$members/$member_id"
+  expect_status "owner lists members: 200" 200 -H "Authorization: Bearer $tok_owner" "$members"
+  expect_status "token of another org: 404" 404 -H "Authorization: Bearer $(tests/stack/issuer.sh mint "$owner_id" 1 owner)" "$members"
+  rows=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'type' = 'dev.synthwerk.identity.member.role_changed.v1'
+    AND event->>'subject' = '$member_id' AND event->>'actor' = 'user:$owner_id'")
+  if [[ "$rows" == 1 ]]; then pass "one member.role_changed by the owner in the outbox"; else fail "member.role_changed rows: $rows, want 1"; fi
+  keys=$(zapi POST /management/v1/users/grants/_search "$zorg" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$member_id\"}}]}")
+  if [[ "$keys" == *'"roleKeys":["admin"]'* ]]; then pass "Zitadel user grant now holds admin"; else fail "Zitadel grant: ${keys:0:200}"; fi
+  published=0
+  for _ in $(seq 1 10); do
+    published=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'subject' = '$member_id' AND published_at IS NOT NULL
+      AND event->>'type' = 'dev.synthwerk.identity.member.role_changed.v1'")
+    [[ "$published" == 1 ]] && break
+    sleep 2
+  done
+  if [[ "$published" == 1 ]]; then pass "member.role_changed published to EVT_IDENTITY"; else fail "member.role_changed not published"; fi
+  # Zitadel calls the hook for the grant change identity made: the mirror has it, no second event.
+  sleep 5
+  rows=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'type' = 'dev.synthwerk.identity.member.role_changed.v1' AND event->>'subject' = '$member_id'")
+  role=$(isql "SELECT role FROM identity.memberships WHERE user_sub = '$member_id'")
+  if [[ "$rows" == 1 && "$role" == admin ]]; then pass "hook echo of the change writes nothing new"; else fail "after the echo: $rows events, role '$role'"; fi
+  # zsync <method> <path> <org id> [json]: HTTP status of a Zitadel call as identity-sync (its PAT).
+  zsync() {
+    docker run --rm --network synthwerk_app -v synthwerk_zitadel-hooks:/h:ro --user 0 --entrypoint sh \
+      curlimages/curl:8.17.0 -c "curl -s -o /dev/null -w '%{http_code}' -X $1 -H 'Host: $auth_domain' \
+      -H \"Authorization: Bearer \$(cat /h/identity.pat)\" -H 'Content-Type: application/json' \
+      -H 'x-zitadel-orgid: $3' http://zitadel:8080$2 ${4:+-d '$4'}" || true
+  }
+  # A refused write must leave the grant as it was; Zitadel answers "not changed" with 400, so
+  # each try asks for a real change and the check reads the grant back.
+  grant_keys() { zapi POST /management/v1/users/grants/_search "$1" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$2\"}}]}" | grep -oE '"roleKeys": *\[[^]]*\]' | head -n 1 | tr -d ' '; }
+  mgrant=$(zapi POST /management/v1/users/grants/_search "$zorg" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$member_id\"}}]}" | first_id id)
+  code=$(zsync PUT "/management/v1/users/$member_id/grants/$mgrant" "$zorg" '{"roleKeys":["admin","operator"]}')
+  keys=$(grant_keys "$zorg" "$member_id")
+  if [[ -n "$mgrant" && "$code" != 200 && "$keys" == '"roleKeys":["admin"]' ]]; then pass "identity-sync cannot give operator in an org: $code"; else fail "operator write: status $code, grant $keys"; fi
+  op_id=$(zapi POST /management/v1/users/_search "$platform" \
+    '{"queries":[{"userNameQuery":{"userName":"operator.test","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
+  opgrant=$(zapi POST /management/v1/users/grants/_search "$platform" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$op_id\"}}]}" | first_id id)
+  code=$(zsync PUT "/management/v1/users/$op_id/grants/$opgrant" "$platform" '{"roleKeys":["operator","member"]}')
+  keys=$(grant_keys "$platform" "$op_id")
+  if [[ -n "$opgrant" && "$code" == 403 && "$keys" == '"roleKeys":["operator"]' ]]; then pass "identity-sync cannot write platform-org grants: 403"; else fail "platform grant write: status $code, grant $keys"; fi
+  leak=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event::text LIKE '%example.test%'")
+  if [[ "$leak" == 0 ]]; then pass "no email in identity events"; else fail "identity events hold an email"; fi
+else
+  echo "skip: identity does not trust the stack test issuer (run tests/stack/issuer.sh setup before compose up)"
 fi
 
 echo "# benign requests pass the WAF"
