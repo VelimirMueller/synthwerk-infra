@@ -1,2 +1,4 @@
 .env
 *.local.yaml
+tests/stack/.issuer-key.pem
+tests/stack/issuer/*.json

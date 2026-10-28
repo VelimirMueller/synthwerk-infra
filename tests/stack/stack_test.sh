@@ -35,7 +35,7 @@ expect_status() {
 
 # One-shot services: they must have exited with code 0, not be healthy.
 # Space on both ends: the loop matches *" $svc "*.
-oneshot=" database-init zitadel-bootstrap "
+oneshot=" database-init zitadel-bootstrap ollama-pull "
 
 echo "# every default service is running and healthy"
 # "config --services" lists only the services of the active profiles (none by default,
@@ -162,6 +162,65 @@ allowed="${SYNTHWERK_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}"
 allowed="${allowed%%,*}"
 if [[ "$(cors_origin "$allowed")" == "$allowed" ]]; then pass "preflight from $allowed is allowed"; else fail "preflight from $allowed has no allow-origin"; fi
 if [[ -z "$(cors_origin https://evil.example)" ]]; then pass "preflight from a foreign origin is not allowed"; else fail "foreign origin is allowed"; fi
+
+echo "# llm: signed-in chat streams, signed-out gets 401 before any model call (synthwerk#32)"
+if tests/stack/issuer.sh active; then
+  # sql <query>: one value from the database as the superuser (RLS does not apply).
+  sql() {
+    docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc "$1" 2>/dev/null || echo error
+  }
+  tok_a=$(tests/stack/issuer.sh mint stack-user-a org-1)
+  tok_b=$(tests/stack/issuer.sh mint stack-user-b org-1)
+  ready=$(curl -s --max-time 10 "$EDGE/llm/readyz" || true)
+  if [[ "$ready" == *'"name":"jwks","status":"ok"'* ]]; then pass "llm reads the issuer key set"; else fail "llm jwks not ok: ${ready:0:200}"; fi
+  expect_status "create without a token gets 401" 401 -X POST -H 'Content-Type: application/json' --data '{}' "$EDGE/llm/v1/conversations"
+  conv=$(curl -s --max-time 10 -X POST -H "Authorization: Bearer $tok_a" -H 'Content-Type: application/json' --data '{}' \
+    "$EDGE/llm/v1/conversations" | grep -o '"id":"[0-9a-f-]*"' | cut -d'"' -f4 || true)
+  if [[ -n "$conv" ]]; then pass "signed-in user creates conversation $conv"; else fail "no conversation id"; fi
+
+  before=$(sql 'SELECT count(*) FROM llm.message')
+  expect_status "send without a token gets 401" 401 -X POST -H 'Content-Type: application/json' \
+    --data '{"content":"no token"}' "$EDGE/llm/v1/conversations/$conv/messages"
+  expect_status "send with a forged token gets 401" 401 -X POST -H "Authorization: Bearer ${tok_a%.*}.AAAA" \
+    -H 'Content-Type: application/json' --data '{"content":"forged"}' "$EDGE/llm/v1/conversations/$conv/messages"
+  after=$(sql 'SELECT count(*) FROM llm.message')
+  if [[ "$before" == "$after" && "$after" != error ]]; then pass "refused sends store nothing and reach no model ($after messages)"; else fail "messages $before -> $after after refused sends"; fi
+  expect_status "another user gets 404 on the conversation" 404 -H "Authorization: Bearer $tok_b" "$EDGE/llm/v1/conversations/$conv"
+
+  # The fake provider answers "echo: one two three four" one word per 300 ms.
+  # Each line gets its arrival time: the deltas must arrive spread out, not in one block.
+  chat_log=$(mktemp)
+  curl -sN --max-time 30 -X POST -H "Authorization: Bearer $tok_a" -H 'Content-Type: application/json' \
+    --data '{"content":"one two three four"}' "$EDGE/llm/v1/conversations/$conv/messages" \
+    | perl -MTime::HiRes=time -ne '$|=1; printf "%.3f %s", time, $_' >"$chat_log" || true
+  deltas=$(grep -c ' event: delta$' "$chat_log" || true)
+  if ((deltas == 5)) && grep -q ' event: done$' "$chat_log"; then pass "answer streams as 5 deltas, then done"; else fail "stream: $deltas deltas, done=$(grep -c ' event: done$' "$chat_log" || true)"; fi
+  spread=$(grep ' event: delta$' "$chat_log" | awk 'NR==1{f=$1} {l=$1} END{printf "%d", (l-f)*1000}')
+  if ((${spread:-0} >= 900)); then pass "deltas arrive over ${spread} ms through edge and WAF (no buffering)"; else fail "deltas arrive within ${spread:-0} ms: the stream is buffered"; fi
+  rm -f "$chat_log"
+
+  expect_status "SQL and HTML in a prompt pass the WAF" 200 -X POST -H "Authorization: Bearer $tok_a" -H 'Content-Type: application/json' \
+    --data "{\"content\":\"Why is ' OR 1=1 -- bad, and what does <script>alert(1)</script> do?\"}" "$EDGE/llm/v1/conversations/$conv/messages"
+  expect_status "SQL in the query still gets 403" 403 -X POST -H "Authorization: Bearer $tok_a" -H 'Content-Type: application/json' \
+    --data '{"content":"hi"}' "$EDGE/llm/v1/conversations/$conv/messages?id=1%27%20OR%20%271%27=%271"
+
+  published=0
+  for _ in $(seq 1 20); do
+    published=$(sql "SELECT count(*) FROM llm.synthwerk_outbox WHERE nats_subject = 'evt.llm.message.completed.v1' AND published_at IS NOT NULL")
+    [[ "$published" =~ ^[0-9]+$ ]] && ((published >= 2)) && break
+    sleep 1
+  done
+  if [[ "$published" =~ ^[0-9]+$ ]] && ((published >= 2)); then pass "message.completed facts reach the bus ($published)"; else fail "published facts: $published"; fi
+  leak=$(sql "SELECT count(*) FROM llm.synthwerk_outbox WHERE event::text LIKE '%one two three%' OR event::text LIKE '%script%'")
+  if [[ "$leak" == "0" ]]; then pass "facts hold no prompt or answer text"; else fail "facts with text: $leak"; fi
+  out=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
+  # The monitor prints indented JSON: "name": "EVT_LLM".
+  if grep -qE '"name": ?"EVT_LLM"' <<<"$out"; then pass "llm created the stream EVT_LLM"; else fail "no stream EVT_LLM on the bus"; fi
+  logs=$(docker compose logs --no-color llm 2>&1)
+  if grep -qE 'one two three|alert\(1\)|no token|forged' <<<"$logs"; then fail "llm logs hold prompt or answer text"; else pass "llm logs hold no prompt or answer text"; fi
+else
+  echo "skip: llm does not trust the stack test issuer (run tests/stack/issuer.sh setup before compose up)"
+fi
 
 echo "# benign requests pass the WAF"
 expect_status "GET /stub/" 200 "$EDGE/stub/"

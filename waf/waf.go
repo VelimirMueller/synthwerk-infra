@@ -126,6 +126,14 @@ func grpcRules(hosts []string) []string {
 	)
 }
 
+// ChatContentRule lets a chat prompt through (synthwerk-llm, #32). A prompt is plain
+// user text: SQL, HTML or shell in it is a question, not an attack, and the gateway
+// never runs or renders it. Only the JSON field "content" of
+// POST /llm/v1/conversations/<uuid>/messages leaves the CRS rules. The URI, the
+// query, the headers and every other body field are still checked.
+const ChatContentRule = `SecRule REQUEST_METHOD "@streq POST" "id:900230,phase:1,pass,t:none,nolog,chain"` + "\n" +
+	`  SecRule REQUEST_FILENAME "@rx ^/llm/v1/conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/messages$" "t:none,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.content"`
+
 // Directives returns the SecLang directives for cfg. CRS is read from the
 // embedded coraza-coreruleset files, so the container needs no rule files.
 func Directives(cfg Config) string {
@@ -144,7 +152,7 @@ func Directives(cfg Config) string {
 		fmt.Sprintf(`SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d"`, cfg.ParanoiaLevel),
 	}
 	d = append(d, grpcRules(cfg.GRPCHosts)...)
-	d = append(d, "Include @owasp_crs/*.conf")
+	d = append(d, ChatContentRule, "Include @owasp_crs/*.conf")
 	return strings.Join(d, "\n")
 }
 
