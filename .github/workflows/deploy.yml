@@ -41,7 +41,7 @@ jobs:
       packages: write
       checks: read
       pull-requests: read
-    uses: VelimirMueller/fleet-workflows/.github/workflows/_build-publish.yml@v0.0.1
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_build-publish.yml@v0.0.2
     with:
       # No artifact yet: the host builds the stack from compose.yaml (fleet.yml CI-TIER-01).
       stack: none
@@ -53,7 +53,7 @@ jobs:
       contents: read
       id-token: write
       actions: read
-    uses: VelimirMueller/fleet-workflows/.github/workflows/_deploy-run.yml@v0.0.1
+    uses: VelimirMueller/fleet-workflows/.github/workflows/_deploy-run.yml@v0.0.2
     with:
       environment: ${{ needs.setup.outputs.env }}
       github-environment: dev
