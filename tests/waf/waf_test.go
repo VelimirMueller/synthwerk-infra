@@ -85,6 +85,20 @@ func TestCheck_KnownAttack_Returns403(t *testing.T) {
 			map[string]string{"Content-Type": "application/grpc-web-text", "X-Forwarded-Host": grpcHost}),
 		"grpc to the login UI path on the gRPC host": forwardAuth(http.MethodPost, "/ui/v2/login/login", grpcFrame,
 			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": grpcHost}),
+		"text/plain server action on another host": forwardAuth(http.MethodPost, "/ui/v2/login/verify", `["x"]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a"}),
+		"text/plain to the login UI without Next-Action": forwardAuth(http.MethodPost, "/ui/v2/login/verify", `["x"]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "X-Forwarded-Host": grpcHost}),
+		"text/plain server action outside the login UI": forwardAuth(http.MethodPost, "/v2/users/human", `["x"]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a", "X-Forwarded-Host": grpcHost}),
+		"sql injection in a login UI server action": forwardAuth(http.MethodPost, "/ui/v2/login/password", `[{"loginName":"admin' OR 1=1--","password":"x"}]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a", "X-Forwarded-Host": grpcHost}),
+		"mongodb operator in json on another host": forwardAuth(http.MethodPost, "/stub/find", `{"user":{"$ne":null}}`,
+			map[string]string{"Content-Type": "application/json"}),
+		"localhost URL in another argument of authorize": forwardAuth(http.MethodGet, "/oauth/v2/authorize?client_id=1&redirect_uri=https%3A%2F%2Fstudio.example&login_hint=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data", "",
+			map[string]string{"X-Forwarded-Host": grpcHost}),
+		"localhost redirect_uri on another host": forwardAuth(http.MethodGet, "/stub/oauth/v2/authorize?redirect_uri=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data", "", nil),
+		"sessionId without Referer on another host": forwardAuth(http.MethodGet, "/stub/?sessionId=397091455929197316", "", nil),
 		"gRPC host with a lookalike name": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
 			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": "auth.localhost.evil.example"}),
 	}
@@ -111,6 +125,17 @@ func TestCheck_BenignRequest_Returns200(t *testing.T) {
 			map[string]string{"Content-Type": "application/grpc-web+proto", "X-Grpc-Web": "1", "X-Forwarded-Host": grpcHost + ":8080"}),
 		"grpc": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
 			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": grpcHost}),
+		// Zitadel login UI v2 (Next.js server action): text/plain with a JSON argument list.
+		"login UI server action": forwardAuth(http.MethodPost, "/ui/v2/login/verify", `[{"userId":"397091281899135748","code":"BX70WU","isInvite":true}]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a", "X-Forwarded-Host": grpcHost + ":8080"}),
+		"login UI server action with Next.js references": forwardAuth(http.MethodPost, "/ui/v2/login/passkey", `[{"sessionId":"397091702638158596","organization":"$undefined","requestId":"$undefined"},"$K1"]`,
+			map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a", "X-Forwarded-Host": grpcHost}),
+		"authorize with a localhost redirect_uri": forwardAuth(http.MethodGet, "/oauth/v2/authorize?client_id=1&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fcallback&response_type=code&scope=openid", "",
+			map[string]string{"X-Forwarded-Host": grpcHost + ":8080"}),
+		"token request with a localhost redirect_uri": forwardAuth(http.MethodPost, "/oauth/v2/token", "grant_type=authorization_code&code=abc&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fcallback&code_verifier=x",
+			map[string]string{"Content-Type": "application/x-www-form-urlencoded", "X-Forwarded-Host": grpcHost}),
+		"login UI step with sessionId and no Referer": forwardAuth(http.MethodGet, "/ui/v2/login/authenticator/set?sessionId=397091455929197316&loginName=probe.x", "",
+			map[string]string{"X-Forwarded-Host": grpcHost + ":8080"}),
 		"connect proto": forwardAuth(http.MethodPost, "/zitadel.settings.v2.SettingsService/GetGeneralSettings", "\x08\x01",
 			map[string]string{"Content-Type": "application/proto", "X-Forwarded-Host": grpcHost}),
 	}
@@ -276,5 +301,18 @@ func TestCheck_ChatPrompt_PassesOnlyInContent(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want 403", name, rec.Code)
 		}
+	}
+}
+
+// A login UI server action body is parsed as JSON. A body that is not JSON is refused
+// (the body processor error answers 400), so text/plain cannot skip the inspection.
+func TestCheck_LoginUIActionNotJSON_Refused(t *testing.T) {
+	h := blockingHandler(t)
+	r := forwardAuth(http.MethodPost, "/ui/v2/login/password", `user=x&<script>`,
+		map[string]string{"Content-Type": "text/plain;charset=UTF-8", "Next-Action": "7f3a", "X-Forwarded-Host": grpcHost})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code == http.StatusOK {
+		t.Fatalf("status = %d, want a refusal", w.Code)
 	}
 }

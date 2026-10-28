@@ -41,6 +41,8 @@ updated: 2026-10-21
 | WAF log fields | status, rule IDs, method, path. No query, no body. |
 | Edge access log | no `RequestPath` (holds the query), no client IP, no headers |
 | Edge spans | query values redacted (`REDACTED`); keep `tracing.safeQueryParams` unset |
+| Zitadel login UI v2 (auth host only) | Server actions (POST under `/ui/v2/login/` with `Next-Action`) may send `text/plain`; the body is parsed as JSON and inspected, CRS 942290 is off for them (Next.js `$` references). 943120 skips the argument name `sessionId` under `/ui/v2/login/`. 934110 skips `redirect_uri` and `post_logout_redirect_uri` on `/oauth/v2/authorize`, `/oauth/v2/token`, `/oidc/v1/end_session`. Without these rules nobody can sign in through the edge (rules 900223 to 900225). |
+| Zitadel admin API | JSON writes from scripts are blocked (for example CRS 930120 on a user profile body). Setup code calls Zitadel inside the stack, not through the edge. |
 
 ## Events
 
@@ -59,7 +61,8 @@ updated: 2026-10-21
 
 ## Tests
 
-- `tests/waf/waf_test.go` — `Check - known attack - returns 403`, `Check - benign request - returns 200`
+- `tests/waf/waf_test.go` — `Check - known attack - returns 403`, `Check - benign request - returns 200` (login UI server action, `sessionId` step, localhost `redirect_uri`; and the refusals off the auth host or outside those paths), `Check - login UI action not JSON - refused`
+- synthwerk-e2e `tests/auth/*.spec.ts` — invite, passkey and password plus TOTP sign-in through the edge
 - `tests/stack/stack_test.sh` — `edge - SQL injection, path traversal, XSS - 403`, `edge - burst - 429`, `edge - WAF down - 500`, `logs - canary query value - absent`
 
 ## Changes
@@ -67,3 +70,4 @@ updated: 2026-10-21
 | Date | Change |
 |---|---|
 | 2026-10-21 | First version. Coraza as a forwardAuth service (ADR-0001). |
+| 2026-10-28 | Exclusions for Zitadel login UI v2 and the OIDC redirect arguments (synthwerk#28). |
