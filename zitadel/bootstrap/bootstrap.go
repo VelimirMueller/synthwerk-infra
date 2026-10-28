@@ -53,6 +53,8 @@ type Config struct {
 	// owner IdentityHookKeyOwner). identity writes org role changes to Zitadel user
 	// grants with it (synthwerk#29). Set up together with the hook.
 	IdentityPATFile string
+	// IdentityPATLifetime is the lifetime of a new identity-sync PAT. Default 30 days.
+	IdentityPATLifetime time.Duration
 	// SMTPHost is the mail server as host:port (Mailpit in local and ci, D-49).
 	// Empty = Zitadel's email provider is not touched (dev and prd set it up apart).
 	SMTPHost string
@@ -87,8 +89,16 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		// 65532: nonroot in the distroless image of synthwerk-identity.
 		IdentityHookKeyOwner: 65532,
 		IdentityPATFile:      or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE"), "/zitadel/hooks/identity.pat"),
+		IdentityPATLifetime:  30 * 24 * time.Hour,
 		SMTPHost:             getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
 		SMTPSender:           or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
+	}
+	if v := getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Hour {
+			return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME %q: want a duration of at least 1h", v)
+		}
+		cfg.IdentityPATLifetime = d
 	}
 	if len(cfg.StudioRedirectURIs) == 0 {
 		return Config{}, errors.New("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: want at least one URI")
@@ -163,7 +173,9 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }}, struct {
 			name string
 			fn   func() error
-		}{"identity machine user", func() error { return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID) }})
+		}{"identity machine user", func() error {
+			return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID, r.ProjectID, r.DemoGrantID)
+		}})
 	}
 	if cfg.SMTPHost != "" {
 		steps = append(steps, struct {
@@ -577,37 +589,29 @@ var HookEvents = []string{"user.human.added", "user.grant.added", "user.grant.ch
 // IdentitySyncUser is the machine user identity calls Zitadel with.
 const IdentitySyncUser = "identity-sync"
 
-// IdentitySyncRoles are its instance roles: read orgs, write user grants in every org.
-var IdentitySyncRoles = []string{"IAM_USER_MANAGER"}
+// IdentitySyncGrantRoles are its roles on each project grant of synthwerk-api: read
+// and write the user grants of that org, nothing else (ADR-0003). It has no
+// instance role and no role in the platform org.
+var IdentitySyncGrantRoles = []string{"PROJECT_GRANT_OWNER"}
 
-// IdentityPATLifetime is the lifetime of a new identity-sync PAT.
-var IdentityPATLifetime = 365 * 24 * time.Hour
-
-// ensureIdentitySync makes the machine user identity-sync in the platform org, gives
-// it IdentitySyncRoles and writes a PAT for identity when the PAT file is missing.
-// Zitadel shows a PAT only once, so an existing file is kept (root cannot read it:
-// it belongs to identity and has mode 0400).
-func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgID string) error {
-	var found struct {
-		Result []struct {
-			ID string `json:"id"`
-		} `json:"result"`
-	}
-	q := map[string]any{"queries": []any{map[string]any{"userNameQuery": map[string]any{"userName": IdentitySyncUser, "method": "TEXT_QUERY_METHOD_EQUALS"}}}}
-	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/_search", platformOrgID, q, &found); err != nil {
+// ensureIdentitySync makes the machine user identity-sync in the platform org and
+// gives it IdentitySyncGrantRoles on the given project grant. When the PAT file is
+// missing it mints a PAT that lives cfg.IdentityPATLifetime, writes it for identity
+// and revokes every older PAT of the user. Zitadel shows a PAT only once, so an
+// existing file is kept (root cannot read it: it belongs to identity, mode 0400).
+func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgID, projectID, projectGrantID string) error {
+	id, err := IdentitySyncUserID(ctx, c, platformOrgID)
+	if err != nil {
 		return err
 	}
-	var id string
-	if len(found.Result) > 0 {
-		id = found.Result[0].ID
-	} else {
+	if id == "" {
 		var made struct {
 			UserID string `json:"userId"`
 		}
 		err := c.Do(ctx, http.MethodPost, "/management/v1/users/machine", platformOrgID, map[string]any{
 			"userName":        IdentitySyncUser,
 			"name":            IdentitySyncUser,
-			"description":     "synthwerk-identity writes org roles to user grants (synthwerk#29)",
+			"description":     "synthwerk-identity writes org roles to user grants (synthwerk#29, ADR-0003)",
 			"accessTokenType": "ACCESS_TOKEN_TYPE_BEARER",
 		}, &made)
 		if err != nil {
@@ -615,13 +619,11 @@ func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgI
 		}
 		id = made.UserID
 	}
-	member := map[string]any{"userId": id, "roles": IdentitySyncRoles}
-	if err := c.Do(ctx, http.MethodPost, "/admin/v1/members", "", member, nil); IsAlreadyExists(err) {
-		err = c.Do(ctx, http.MethodPut, "/admin/v1/members/"+id, "", map[string]any{"roles": IdentitySyncRoles}, nil)
-		if err != nil && !IsNotChanged(err) {
-			return err
-		}
-	} else if err != nil {
+	// An older bootstrap gave an instance role: take it away (not found = fine).
+	if err := c.Do(ctx, http.MethodDelete, "/admin/v1/members/"+id, "", nil, nil); err != nil && !IsNotFound(err) {
+		return err
+	}
+	if err := GrantIdentitySync(ctx, c, platformOrgID, projectID, projectGrantID, id); err != nil {
 		return err
 	}
 	if _, err := os.Stat(cfg.IdentityPATFile); err == nil {
@@ -630,16 +632,73 @@ func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgI
 		return err
 	}
 	var pat struct {
-		Token string `json:"token"`
+		TokenID string `json:"tokenId"`
+		Token   string `json:"token"`
 	}
-	exp := time.Now().Add(IdentityPATLifetime).UTC().Format(time.RFC3339)
+	exp := time.Now().Add(cfg.IdentityPATLifetime).UTC().Format(time.RFC3339)
 	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+id+"/pats", platformOrgID, map[string]any{"expirationDate": exp}, &pat); err != nil {
 		return err
 	}
-	if pat.Token == "" {
+	if pat.Token == "" || pat.TokenID == "" {
 		return fmt.Errorf("user %s: Zitadel returned no PAT", IdentitySyncUser)
 	}
-	return writeKey(cfg.IdentityPATFile, pat.Token, cfg.IdentityHookKeyOwner)
+	if err := writeKey(cfg.IdentityPATFile, pat.Token, cfg.IdentityHookKeyOwner); err != nil {
+		return err
+	}
+	return revokeOtherPATs(ctx, c, platformOrgID, id, pat.TokenID)
+}
+
+// IdentitySyncUserID returns the id of identity-sync, or "" when it does not exist.
+func IdentitySyncUserID(ctx context.Context, c *Client, platformOrgID string) (string, error) {
+	var found struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	q := map[string]any{"queries": []any{map[string]any{"userNameQuery": map[string]any{"userName": IdentitySyncUser, "method": "TEXT_QUERY_METHOD_EQUALS"}}}}
+	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/_search", platformOrgID, q, &found); err != nil {
+		return "", err
+	}
+	if len(found.Result) == 0 {
+		return "", nil
+	}
+	return found.Result[0].ID, nil
+}
+
+// GrantIdentitySync gives identity-sync IdentitySyncGrantRoles on one project grant.
+// Whoever creates a project grant of synthwerk-api for a new org calls it, or role
+// changes in that org answer 502 (ADR-0003).
+func GrantIdentitySync(ctx context.Context, c *Client, platformOrgID, projectID, projectGrantID, userID string) error {
+	path := "/management/v1/projects/" + projectID + "/grants/" + projectGrantID + "/members"
+	err := c.Do(ctx, http.MethodPost, path, platformOrgID, map[string]any{"userId": userID, "roles": IdentitySyncGrantRoles}, nil)
+	if IsAlreadyExists(err) {
+		err = c.Do(ctx, http.MethodPut, path+"/"+userID, platformOrgID, map[string]any{"roles": IdentitySyncGrantRoles}, nil)
+		if IsNotChanged(err) {
+			return nil
+		}
+	}
+	return err
+}
+
+// revokeOtherPATs deletes every PAT of the user except keep.
+func revokeOtherPATs(ctx context.Context, c *Client, orgID, userID, keep string) error {
+	var found struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+userID+"/pats/_search", orgID, map[string]any{}, &found); err != nil {
+		return err
+	}
+	for _, p := range found.Result {
+		if p.ID == keep {
+			continue
+		}
+		if err := c.Do(ctx, http.MethodDelete, "/management/v1/users/"+userID+"/pats/"+p.ID, orgID, nil, nil); err != nil && !IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureIdentityHook creates or updates the target, writes its signing key for

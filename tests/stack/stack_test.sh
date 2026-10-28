@@ -237,10 +237,19 @@ if tests/stack/issuer.sh active; then
   isql() {
     docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc "$1" 2>/dev/null || echo error
   }
-  first_id() { grep -o "\"$1\":\"[0-9]*\"" | head -n 1 | cut -d'"' -f4; }
+  # first_id <key>: the first "<key>": "<digits>" value on stdin, or nothing.
+  first_id() { { grep -oE "\"$1\": *\"[0-9]+\"" || true; } | head -n 1 | tr -d ' ' | cut -d'"' -f4; }
   project=$(docker run --rm -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint cat curlimages/curl:8.17.0 /b/studio-client.json | first_id project_id)
   zorg=$(zapi POST /management/v1/orgs - "{\"name\":\"Roles Stack $$\"}" | first_id id)
   pgrant=$(zapi POST "/management/v1/projects/$project/grants" - "{\"grantedOrgId\":\"$zorg\",\"roleKeys\":[\"owner\",\"admin\",\"member\"]}" | first_id grantId)
+  # identity-sync may write the grants of an org only with PROJECT_GRANT_OWNER on its
+  # project grant (ADR-0003): whoever makes a project grant adds it.
+  platform=$(zapi GET /management/v1/orgs/me - | first_id id)
+  sync_id=$(zapi POST /management/v1/users/_search "$platform" \
+    '{"queries":[{"userNameQuery":{"userName":"identity-sync","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
+  zapi POST "/management/v1/projects/$project/grants/$pgrant/members" - "{\"userId\":\"$sync_id\",\"roles\":[\"PROJECT_GRANT_OWNER\"]}" >/dev/null
+  iam=$(zapi POST /admin/v1/members/_search - '{}')
+  if [[ -n "$sync_id" && "$iam" != *"$sync_id"* ]]; then pass "identity-sync has no instance role"; else fail "identity-sync '${sync_id:-missing}' is an instance member"; fi
   # mkuser <name> <role>: a user in the test org with one grant; prints the user id.
   mkuser() {
     local id
@@ -262,6 +271,9 @@ if tests/stack/issuer.sh active; then
     sleep 3
   done
   if [[ -n "$org_id" ]]; then pass "grants of a new org reach identity: org $org_id active with 2 members"; else fail "org '$zorg' (project '$project', grant '$pgrant', users '$owner_id' '$member_id') not mirrored as active with 2 members"; fi
+  slug=$(isql "SELECT slug FROM identity.orgs WHERE id = '$org_id'")
+  # identity reads the org name from the grant since synthwerk-identity#12; older images fall back to org-<id>.
+  if [[ "$slug" == "roles-stack-$$" || "$slug" == org-* ]]; then pass "org has a slug: $slug"; else fail "slug '$slug', want roles-stack-$$ or org-<id>"; fi
   rows=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'type' = 'dev.synthwerk.identity.org.created.v1' AND event->>'subject' = '$org_id'")
   if [[ "$rows" == 1 ]]; then pass "one org.created for the new org"; else fail "org.created rows: $rows, want 1"; fi
   tok_owner=$(tests/stack/issuer.sh mint "$owner_id" "$zorg" owner)
@@ -292,6 +304,26 @@ if tests/stack/issuer.sh active; then
   rows=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event->>'type' = 'dev.synthwerk.identity.member.role_changed.v1' AND event->>'subject' = '$member_id'")
   role=$(isql "SELECT role FROM identity.memberships WHERE user_sub = '$member_id'")
   if [[ "$rows" == 1 && "$role" == admin ]]; then pass "hook echo of the change writes nothing new"; else fail "after the echo: $rows events, role '$role'"; fi
+  # zsync <method> <path> <org id> [json]: HTTP status of a Zitadel call as identity-sync (its PAT).
+  zsync() {
+    docker run --rm --network synthwerk_app -v synthwerk_zitadel-hooks:/h:ro --user 0 --entrypoint sh \
+      curlimages/curl:8.17.0 -c "curl -s -o /dev/null -w '%{http_code}' -X $1 -H 'Host: $auth_domain' \
+      -H \"Authorization: Bearer \$(cat /h/identity.pat)\" -H 'Content-Type: application/json' \
+      -H 'x-zitadel-orgid: $3' http://zitadel:8080$2 ${4:+-d '$4'}" || true
+  }
+  # A refused write must leave the grant as it was; Zitadel answers "not changed" with 400, so
+  # each try asks for a real change and the check reads the grant back.
+  grant_keys() { zapi POST /management/v1/users/grants/_search "$1" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$2\"}}]}" | grep -oE '"roleKeys": *\[[^]]*\]' | head -n 1 | tr -d ' '; }
+  mgrant=$(zapi POST /management/v1/users/grants/_search "$zorg" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$member_id\"}}]}" | first_id id)
+  code=$(zsync PUT "/management/v1/users/$member_id/grants/$mgrant" "$zorg" '{"roleKeys":["admin","operator"]}')
+  keys=$(grant_keys "$zorg" "$member_id")
+  if [[ -n "$mgrant" && "$code" != 200 && "$keys" == '"roleKeys":["admin"]' ]]; then pass "identity-sync cannot give operator in an org: $code"; else fail "operator write: status $code, grant $keys"; fi
+  op_id=$(zapi POST /management/v1/users/_search "$platform" \
+    '{"queries":[{"userNameQuery":{"userName":"operator.test","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
+  opgrant=$(zapi POST /management/v1/users/grants/_search "$platform" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$op_id\"}}]}" | first_id id)
+  code=$(zsync PUT "/management/v1/users/$op_id/grants/$opgrant" "$platform" '{"roleKeys":["operator","member"]}')
+  keys=$(grant_keys "$platform" "$op_id")
+  if [[ -n "$opgrant" && "$code" == 403 && "$keys" == '"roleKeys":["operator"]' ]]; then pass "identity-sync cannot write platform-org grants: 403"; else fail "platform grant write: status $code, grant $keys"; fi
   leak=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event::text LIKE '%example.test%'")
   if [[ "$leak" == 0 ]]; then pass "no email in identity events"; else fail "identity events hold an email"; fi
 else

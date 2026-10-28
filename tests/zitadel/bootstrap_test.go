@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/VelimirMueller/synthwerk-infra/zitadel/bootstrap"
 )
@@ -37,7 +38,9 @@ type fake struct {
 	policies map[string]map[string]any
 	smtp     map[string]map[string]any // id -> provider
 	members  map[string][]string       // instance member user id -> roles
-	pats     int
+	gmembers map[string][]string       // project grant id/user id -> roles
+	pats     map[string]bool           // user id/token id of live PATs
+	patN     int
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
 	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
@@ -51,6 +54,7 @@ func newFake() *fake {
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{},
 		smtp: map[string]map[string]any{}, members: map[string][]string{},
+		gmembers: map[string][]string{}, pats: map[string]bool{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -86,6 +90,9 @@ var (
 	reProject = regexp.MustCompile(`^/management/v1/projects/([^/]+)$`)
 	reSub     = regexp.MustCompile(`^/management/v1/projects/[^/]+/(roles|grants|apps)(/.*)?$`)
 	reUser    = regexp.MustCompile(`^/management/v1/users/([^/]+)/(password|grants)(/.*)?$`)
+	rePAT     = regexp.MustCompile(`^/management/v1/users/([^/]+)/pats(/.*)?$`)
+	// reGrantMember is checked before reSub: members of a project grant.
+	reGrantMember = regexp.MustCompile(`^/management/v1/projects/[^/]+/grants/([^/]+)/members/?([^/]*)$`)
 )
 
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +153,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"id": id})
 	case reProject.MatchString(p) && r.Method == http.MethodPut:
 		reply(map[string]any{})
-	case reSub.MatchString(p):
+	case reSub.MatchString(p) && !reGrantMember.MatchString(p):
 		f.project(w, r.Method, p, in, reply, result)
 	case p == "/management/v1/users/_search":
 		var items []map[string]any
@@ -158,21 +165,49 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := f.id("m")
 		f.users[org+"/"+in["userName"].(string)] = id
 		reply(map[string]any{"userId": id})
-	case p == "/admin/v1/members" && r.Method == http.MethodPost:
-		uid := in["userId"].(string)
-		if f.members[uid] != nil {
-			w.WriteHeader(http.StatusConflict)
-			reply(map[string]any{"code": 6, "message": "already exists"})
+	case strings.HasPrefix(p, "/admin/v1/members/") && r.Method == http.MethodDelete:
+		uid := strings.TrimPrefix(p, "/admin/v1/members/")
+		if f.members[uid] == nil {
+			w.WriteHeader(http.StatusNotFound)
+			reply(map[string]any{"code": 5, "message": "member not found"})
 			return
 		}
-		f.members[uid] = strSlice(in["roles"])
+		delete(f.members, uid)
 		reply(map[string]any{})
-	case strings.HasPrefix(p, "/admin/v1/members/") && r.Method == http.MethodPut:
-		f.members[strings.TrimPrefix(p, "/admin/v1/members/")] = strSlice(in["roles"])
+	case reGrantMember.MatchString(p):
+		m := reGrantMember.FindStringSubmatch(p)
+		uid := m[2]
+		if uid == "" {
+			uid = in["userId"].(string)
+			if f.gmembers[m[1]+"/"+uid] != nil && r.Method == http.MethodPost {
+				// Zitadel v4.20 answers a second grant member with 404, code 5.
+				w.WriteHeader(http.StatusNotFound)
+				reply(map[string]any{"code": 5, "message": "Errors.AlreadyExists (PROJECT-37fug)"})
+				return
+			}
+		}
+		f.gmembers[m[1]+"/"+uid] = strSlice(in["roles"])
 		reply(map[string]any{})
-	case strings.HasPrefix(p, "/management/v1/users/") && strings.HasSuffix(p, "/pats"):
-		f.pats++
-		reply(map[string]any{"tokenId": f.id("pat"), "token": fmt.Sprintf("pat-%d", f.pats)})
+	case rePAT.MatchString(p):
+		m := rePAT.FindStringSubmatch(p)
+		switch {
+		case m[2] == "/_search":
+			var items []map[string]any
+			for k := range f.pats {
+				if strings.HasPrefix(k, m[1]+"/") {
+					items = append(items, map[string]any{"id": strings.TrimPrefix(k, m[1]+"/")})
+				}
+			}
+			result(items)
+		case r.Method == http.MethodDelete:
+			delete(f.pats, m[1]+m[2]) // m[2] is "/<token id>"
+			reply(map[string]any{})
+		default:
+			f.patN++
+			tid := fmt.Sprintf("tok-%d", f.patN)
+			f.pats[m[1]+"/"+tid] = true
+			reply(map[string]any{"tokenId": tid, "token": fmt.Sprintf("pat-%d", f.patN)})
+		}
 	case p == "/management/v1/users/human/_import":
 		id := f.id("u")
 		f.users[org+"/"+in["userName"].(string)] = id
@@ -528,10 +563,16 @@ func hookSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
 
 func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
 	f, c, cfg := hookSetup(t)
-	run(t, c, cfg)
+	r := run(t, c, cfg)
 	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
-	if id == "" || !slices.Equal(f.members[id], bootstrap.IdentitySyncRoles) {
-		t.Fatalf("machine user %q, instance roles %v", id, f.members[id])
+	if id == "" {
+		t.Fatal("no machine user identity-sync")
+	}
+	if f.members[id] != nil {
+		t.Errorf("identity-sync has instance roles %v, want none", f.members[id])
+	}
+	if got := f.gmembers[r.DemoGrantID+"/"+id]; !slices.Equal(got, bootstrap.IdentitySyncGrantRoles) {
+		t.Errorf("roles on the demo project grant %v, want %v", got, bootstrap.IdentitySyncGrantRoles)
 	}
 	pat, err := os.ReadFile(cfg.IdentityPATFile)
 	if err != nil || string(pat) != "pat-1" {
@@ -541,13 +582,46 @@ func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
 		t.Errorf("pat file mode %v, want 0400", st.Mode().Perm())
 	}
 	run(t, c, cfg)
-	if f.pats != 1 || len(f.users) == 0 {
-		t.Errorf("second run made %d PATs, want 1 in total", f.pats)
+	if f.patN != 1 {
+		t.Errorf("second run made %d PATs, want 1 in total", f.patN)
 	}
 	for _, ev := range []string{"user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"} {
 		if len(f.execs[ev]) != 1 {
 			t.Errorf("no execution for %s", ev)
 		}
+	}
+}
+
+func TestIdentitySyncNewPATRevokesOldOnes(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	f.members[id] = []string{"IAM_USER_MANAGER"} // made by an older bootstrap
+	// The file is gone (new volume): a new PAT, and the old one is revoked.
+	if err := os.Remove(cfg.IdentityPATFile); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, cfg)
+	if len(f.pats) != 1 || !f.pats[id+"/tok-2"] {
+		t.Errorf("live PATs %v, want only tok-2", f.pats)
+	}
+	if f.members[id] != nil {
+		t.Errorf("old instance role kept: %v", f.members[id])
+	}
+}
+
+func TestIdentityPATLifetime(t *testing.T) {
+	cfg, err := bootstrap.ConfigFromEnv(func(string) string { return "" })
+	if err != nil || cfg.IdentityPATLifetime != 30*24*time.Hour {
+		t.Fatalf("default %v, %v", cfg.IdentityPATLifetime, err)
+	}
+	if _, err := bootstrap.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME" {
+			return "1m"
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("1m accepted")
 	}
 }
 
