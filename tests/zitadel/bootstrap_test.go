@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,7 +41,7 @@ type fake struct {
 	smtp     map[string]map[string]any // id -> provider
 	members  map[string][]string       // instance member user id -> roles
 	gmembers map[string][]string       // project grant id/user id -> roles
-	pats     map[string]bool           // user id/token id of live PATs
+	pats     map[string]string         // user id/token id of live PATs -> expiration date
 	patN     int
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
@@ -54,7 +56,7 @@ func newFake() *fake {
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{},
 		smtp: map[string]map[string]any{}, members: map[string][]string{},
-		gmembers: map[string][]string{}, pats: map[string]bool{},
+		gmembers: map[string][]string{}, pats: map[string]string{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -193,11 +195,19 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case m[2] == "/_search":
 			var items []map[string]any
-			for k := range f.pats {
+			for _, k := range slices.Sorted(maps.Keys(f.pats)) {
 				if strings.HasPrefix(k, m[1]+"/") {
-					items = append(items, map[string]any{"id": strings.TrimPrefix(k, m[1]+"/")})
+					items = append(items, map[string]any{"id": strings.TrimPrefix(k, m[1]+"/"), "expirationDate": f.pats[k]})
 				}
 			}
+			// The query pages like Zitadel: offset (a string) and limit.
+			q, _ := in["query"].(map[string]any)
+			off, _ := strconv.Atoi(fmt.Sprint(q["offset"]))
+			limit, _ := q["limit"].(float64)
+			if limit == 0 || limit > 100 {
+				limit = 100
+			}
+			items = items[min(off, len(items)):min(off+int(limit), len(items))]
 			result(items)
 		case r.Method == http.MethodDelete:
 			delete(f.pats, m[1]+m[2]) // m[2] is "/<token id>"
@@ -205,7 +215,8 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			f.patN++
 			tid := fmt.Sprintf("tok-%d", f.patN)
-			f.pats[m[1]+"/"+tid] = true
+			exp, _ := in["expirationDate"].(string)
+			f.pats[m[1]+"/"+tid] = exp
 			reply(map[string]any{"tokenId": tid, "token": fmt.Sprintf("pat-%d", f.patN)})
 		}
 	case p == "/management/v1/users/human/_import":
@@ -602,11 +613,73 @@ func TestIdentitySyncNewPATRevokesOldOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, c, cfg)
-	if len(f.pats) != 1 || !f.pats[id+"/tok-2"] {
+	if len(f.pats) != 1 || f.pats[id+"/tok-2"] == "" {
 		t.Errorf("live PATs %v, want only tok-2", f.pats)
 	}
 	if f.members[id] != nil {
 		t.Errorf("old instance role kept: %v", f.members[id])
+	}
+}
+
+func TestIdentityPATRenewedNearExpiry(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	// A rerun with a fresh PAT keeps it.
+	run(t, c, cfg)
+	if len(f.pats) != 1 || f.pats[id+"/tok-1"] == "" {
+		t.Fatalf("fresh PAT replaced: %v", f.pats)
+	}
+	// The PAT ends in a day (under a third of its lifetime): the rerun mints a new one
+	// and revokes the old one.
+	f.pats[id+"/tok-1"] = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	run(t, c, cfg)
+	if len(f.pats) != 1 || f.pats[id+"/tok-2"] == "" {
+		t.Fatalf("live PATs %v, want only tok-2", f.pats)
+	}
+	got, err := os.ReadFile(cfg.IdentityPATFile)
+	if err != nil || string(got) != "pat-2" {
+		t.Fatalf("PAT file %q, %v: want pat-2", got, err)
+	}
+}
+
+func TestIdentityPATRunTwiceOneActive(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	got, err := os.ReadFile(cfg.IdentityPATFile + ".id")
+	if err != nil || len(f.pats) != 1 || f.pats[id+"/"+string(got)] == "" {
+		t.Fatalf("live PATs %v, id file %q (%v): want one, the one in the file", f.pats, got, err)
+	}
+}
+
+func TestIdentityPATRevokesLeftoversOnEveryRun(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	// An earlier run failed to revoke: 150 old PATs, more than one search page.
+	exp := time.Now().Add(240 * time.Hour).UTC().Format(time.RFC3339)
+	for i := range 150 {
+		f.pats[fmt.Sprintf("%s/old-%03d", id, i)] = exp
+	}
+	run(t, c, cfg) // the file is there and fresh: no new PAT, but the leftovers go
+	if len(f.pats) != 1 || f.pats[id+"/tok-1"] == "" {
+		t.Fatalf("%d live PATs, want only tok-1", len(f.pats))
+	}
+}
+
+func TestIdentityPATWriteFailureDeletesTheNewPAT(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	// The id file cannot be written: a non-empty directory sits at its path.
+	if err := os.MkdirAll(cfg.IdentityPATFile+".id/x", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bootstrap.Run(context.Background(), c, cfg, slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("run passed, want the write error")
+	}
+	if len(f.pats) != 0 {
+		t.Fatalf("live PATs %v after a failed write, want none", f.pats)
 	}
 }
 

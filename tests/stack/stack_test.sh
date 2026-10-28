@@ -250,6 +250,10 @@ if tests/stack/issuer.sh active; then
   zapi POST "/management/v1/projects/$project/grants/$pgrant/members" - "{\"userId\":\"$sync_id\",\"roles\":[\"PROJECT_GRANT_OWNER\"]}" >/dev/null
   iam=$(zapi POST /admin/v1/members/_search - '{}')
   if [[ -n "$sync_id" && "$iam" != *"$sync_id"* ]]; then pass "identity-sync has no instance role"; else fail "identity-sync '${sync_id:-missing}' is an instance member"; fi
+  # After two bootstrap runs identity-sync has one live PAT: the one whose id is in the file.
+  pats=$(zapi POST "/management/v1/users/$sync_id/pats/_search" "$platform" '{}' | { grep -oE '"id": *"[0-9]+"' || true; } | tr -d ' ' | cut -d'"' -f4)
+  pat_id=$(docker run --rm -v synthwerk_zitadel-hooks:/h:ro --entrypoint cat curlimages/curl:8.17.0 /h/identity.pat.id 2>/dev/null)
+  if [[ -n "$pat_id" && "$pats" == "$pat_id" ]]; then pass "identity-sync has one live PAT, the one in the file"; else fail "identity-sync PATs '$pats', file id '$pat_id'"; fi
   # mkuser <name> <role>: a user in the test org with one grant; prints the user id.
   mkuser() {
     local id

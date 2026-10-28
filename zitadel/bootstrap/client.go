@@ -49,8 +49,11 @@ func (e *APIError) Error() string {
 // and the message key Errors.AlreadyExists.
 func IsAlreadyExists(err error) bool {
 	var e *APIError
-	return errors.As(err, &e) && (e.Code == 6 || e.Status == http.StatusConflict ||
-		strings.Contains(e.Message, "Errors.AlreadyExists"))
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code == 6 || e.Status == http.StatusConflict ||
+		((e.Code == 5 || e.Status == http.StatusNotFound) && strings.Contains(e.Message, "Errors.AlreadyExists"))
 }
 
 // IsNotFound is true for "not found" answers (gRPC code 5, HTTP 404).

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -626,26 +627,90 @@ func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgI
 	if err := GrantIdentitySync(ctx, c, platformOrgID, projectID, projectGrantID, id); err != nil {
 		return err
 	}
-	if _, err := os.Stat(cfg.IdentityPATFile); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	keep, err := currentPAT(ctx, c, cfg, platformOrgID, id)
+	if err != nil {
 		return err
 	}
+	if keep == "" {
+		if keep, err = mintIdentityPAT(ctx, c, cfg, platformOrgID, id); err != nil {
+			return err
+		}
+	}
+	// Every run: only the PAT in the file stays valid, also after an earlier
+	// failed revocation.
+	return revokeOtherPATs(ctx, c, platformOrgID, id, keep)
+}
+
+// identityPATIDFile holds the id of the PAT in IdentityPATFile. The id is no
+// secret; the file belongs to root (0444) so a rerun can read it.
+func identityPATIDFile(cfg Config) string { return cfg.IdentityPATFile + ".id" }
+
+// currentPAT returns the id of the PAT in the file when it may stay: both files
+// exist and Zitadel lists that PAT with more than a third of its lifetime left.
+// Otherwise it returns "" and a new PAT is due.
+func currentPAT(ctx context.Context, c *Client, cfg Config, orgID, userID string) (string, error) {
+	if _, err := os.Stat(cfg.IdentityPATFile); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(identityPATIDFile(cfg))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil // made before the id file existed: replace it
+	} else if err != nil {
+		return "", err
+	}
+	tokenID := strings.TrimSpace(string(raw))
+	pats, err := listPATs(ctx, c, orgID, userID)
+	if err != nil {
+		return "", err
+	}
+	renewAt := time.Now().Add(cfg.IdentityPATLifetime / 3)
+	for _, p := range pats {
+		if p.ID == tokenID && p.ExpirationDate.After(renewAt) {
+			return tokenID, nil
+		}
+	}
+	return "", nil
+}
+
+// mintIdentityPAT makes a PAT, writes it and its id, and returns the id. When a
+// write fails it deletes the new PAT again, so nothing unknown stays valid and the
+// next run tries again.
+func mintIdentityPAT(ctx context.Context, c *Client, cfg Config, orgID, userID string) (string, error) {
 	var pat struct {
 		TokenID string `json:"tokenId"`
 		Token   string `json:"token"`
 	}
 	exp := time.Now().Add(cfg.IdentityPATLifetime).UTC().Format(time.RFC3339)
-	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+id+"/pats", platformOrgID, map[string]any{"expirationDate": exp}, &pat); err != nil {
-		return err
+	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+userID+"/pats", orgID, map[string]any{"expirationDate": exp}, &pat); err != nil {
+		return "", err
 	}
 	if pat.Token == "" || pat.TokenID == "" {
-		return fmt.Errorf("user %s: Zitadel returned no PAT", IdentitySyncUser)
+		return "", fmt.Errorf("user %s: Zitadel returned no PAT", IdentitySyncUser)
 	}
-	if err := writeKey(cfg.IdentityPATFile, pat.Token, cfg.IdentityHookKeyOwner); err != nil {
+	err := writeKey(cfg.IdentityPATFile, pat.Token, cfg.IdentityHookKeyOwner)
+	if err == nil {
+		err = writePublic(identityPATIDFile(cfg), pat.TokenID)
+	}
+	if err != nil {
+		_ = os.Remove(identityPATIDFile(cfg))
+		if derr := c.Do(ctx, http.MethodDelete, "/management/v1/users/"+userID+"/pats/"+pat.TokenID, orgID, nil, nil); derr != nil && !IsNotFound(derr) {
+			return "", errors.Join(err, derr)
+		}
+		return "", err
+	}
+	return pat.TokenID, nil
+}
+
+// writePublic writes a non-secret file (0444, owner root) through a temp file.
+func writePublic(path, value string) error {
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.WriteFile(tmp, []byte(value), 0o444); err != nil { //nolint:gosec // G306: the PAT id is no secret
 		return err
 	}
-	return revokeOtherPATs(ctx, c, platformOrgID, id, pat.TokenID)
+	return os.Rename(tmp, path)
 }
 
 // IdentitySyncUserID returns the id of identity-sync, or "" when it does not exist.
@@ -680,17 +745,41 @@ func GrantIdentitySync(ctx context.Context, c *Client, platformOrgID, projectID,
 	return err
 }
 
+// patInfo is one PAT of a user as the PAT search lists it.
+type patInfo struct {
+	ID             string    `json:"id"`
+	ExpirationDate time.Time `json:"expirationDate"`
+}
+
+// patPage is the page size of the PAT search.
+const patPage = 100
+
+// listPATs returns every PAT of the user, page by page.
+func listPATs(ctx context.Context, c *Client, orgID, userID string) ([]patInfo, error) {
+	var all []patInfo
+	for offset := 0; ; offset += patPage {
+		var found struct {
+			Result []patInfo `json:"result"`
+		}
+		err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+userID+"/pats/_search", orgID,
+			map[string]any{"query": map[string]any{"offset": strconv.Itoa(offset), "limit": patPage}}, &found)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, found.Result...)
+		if len(found.Result) < patPage {
+			return all, nil
+		}
+	}
+}
+
 // revokeOtherPATs deletes every PAT of the user except keep.
 func revokeOtherPATs(ctx context.Context, c *Client, orgID, userID, keep string) error {
-	var found struct {
-		Result []struct {
-			ID string `json:"id"`
-		} `json:"result"`
-	}
-	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+userID+"/pats/_search", orgID, map[string]any{}, &found); err != nil {
+	pats, err := listPATs(ctx, c, orgID, userID)
+	if err != nil {
 		return err
 	}
-	for _, p := range found.Result {
+	for _, p := range pats {
 		if p.ID == keep {
 			continue
 		}

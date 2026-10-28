@@ -32,7 +32,7 @@ updated: 2026-10-28
 - Writes the target signing key to `identity-signing.key` (mode 0400, owner 65532) in the volume `zitadel-hooks`, which identity reads. Zitadel returns the key in every target search, so each run can write it.
 - Creates the test users `operator.test` (platform, `operator`), `owner.demo` (demo, `owner`) and `member.demo` (demo, `member`), only when `SYNTHWERK_ZITADEL_TEST_USER_PASSWORD` is set.
 - The demo org may grant `owner`, `admin`, `member` and `end_user` (synthwerk#29).
-- With the identity hook: Action executions for `user.human.added` and the user grant events (`user.grant.added|changed|removed|cascade.removed`), and the machine user `identity-sync` with `PROJECT_GRANT_OWNER` on the demo project grant, no instance role (ADR-0003). Its PAT (30 days, `SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME`) goes to `/zitadel/hooks/identity.pat` (mode 0400, owner 65532) only when the file is missing; a new PAT revokes the older ones. identity writes role changes to user grants with it.
+- With the identity hook: Action executions for `user.human.added` and the user grant events (`user.grant.added|changed|removed|cascade.removed`), and the machine user `identity-sync` with `PROJECT_GRANT_OWNER` on the demo project grant, no instance role (ADR-0003). Its PAT (30 days, `SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME`) goes to `/zitadel/hooks/identity.pat` (mode 0400, owner 65532), its id to `identity.pat.id` (0444, no secret). A run mints a new PAT when a file is missing or the PAT has less than a third of its lifetime left. Every run revokes all other PATs of `identity-sync` (all search pages). A failed file write deletes the new PAT again. identity writes role changes to user grants with it.
 
 ## How to use
 
