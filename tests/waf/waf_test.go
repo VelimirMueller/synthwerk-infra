@@ -240,3 +240,41 @@ func TestDirectives_SetsParanoiaLevelBeforeCRS(t *testing.T) {
 		t.Fatalf("paranoia level must be set before the CRS rules:\n%s", d)
 	}
 }
+
+// chatPath is the llm send route on the edge, before the prefix strip.
+const chatPath = "/llm/v1/conversations/0199f3b0-1a2c-7c3d-8e4f-5a6b7c8d9e10/messages"
+
+// A chat prompt is plain user text: SQL or HTML in it is a question, not an attack.
+// Only the JSON field "content" of the send route skips the CRS rules (#32).
+func TestCheck_ChatPrompt_PassesOnlyInContent(t *testing.T) {
+	h := blockingHandler(t)
+	prompt := `{"content":"Why is ' OR 1=1 -- bad, and what does <script>alert(1)</script> do? Also ; cat /etc/passwd"}`
+	jsonHeader := map[string]string{"Content-Type": "application/json"}
+	pass := map[string]*http.Request{
+		"prompt in content": forwardAuth(http.MethodPost, chatPath, prompt, jsonHeader),
+		"plain prompt":      forwardAuth(http.MethodPost, chatPath, `{"content":"exit"}`, jsonHeader),
+	}
+	for name, req := range pass {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", name, rec.Code)
+		}
+	}
+	block := map[string]*http.Request{
+		"same text in another field": forwardAuth(http.MethodPost, chatPath, `{"content":"hi","model":"' OR 1=1 --"}`, jsonHeader),
+		"same text in the query":     forwardAuth(http.MethodPost, chatPath+"?q=1%27%20OR%201=1%20--", `{"content":"hi"}`, jsonHeader),
+		"same text in a header": forwardAuth(http.MethodPost, chatPath, `{"content":"hi"}`,
+			map[string]string{"Content-Type": "application/json", "Referer": "http://x/?id=1' OR '1'='1"}),
+		"content on another route": forwardAuth(http.MethodPost, "/llm/v1/conversations", prompt, jsonHeader),
+		"content on a longer path": forwardAuth(http.MethodPost, chatPath+"/x", prompt, jsonHeader),
+		"content on GET":           forwardAuth(http.MethodGet, chatPath, prompt, jsonHeader),
+	}
+	for name, req := range block {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", name, rec.Code)
+		}
+	}
+}

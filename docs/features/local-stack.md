@@ -36,10 +36,15 @@ updated: 2026-10-23
 - Lets gRPC, gRPC-web and Connect pass the WAF on the Zitadel host only (`SYNTHWERK_WAF_GRPC_HOSTS`, set from the Zitadel domain). There they are on the CRS content-type list, and their binary body is not inspected. The URI, query and headers are still checked. Every other host keeps the CRS defaults.
 - Answers 400 to a request with more than one `Content-Type` header.
 - Leaves JetStream streams (for example `EVT_LLM`) to the services: each service creates its own stream at start, like pulse.
+- Runs llm with the provider from `SYNTHWERK_LLM_PROVIDER` (default `ollama`; `fake` in the CI stack test). The model of the alias `default` is `SYNTHWERK_LLM_DEFAULT_MODEL` (default `qwen3.5:4b`). The `ollama` profile also runs the one-shot `ollama-pull`, which pulls that model.
+- Lets a chat prompt pass the WAF: only the JSON field `content` of `POST /llm/v1/conversations/<uuid>/messages` skips the CRS rules (rule 900230). The URI, query, headers and other fields are still checked.
+- `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm at it. Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
 
 ## How to use
 
 1. Run `scripts/init-env.sh`. It writes `.env` with random dev passwords.
+   For the stack test, also run `tests/stack/issuer.sh setup` (llm then answers with the fake provider).
+   For a real model, run `docker compose --profile ollama up --wait` instead of step 2.
 2. Run `docker compose up --wait`.
 3. Run `tests/stack/stack_test.sh`.
 4. Open Grafana at `http://localhost:3000`.
@@ -89,6 +94,8 @@ updated: 2026-10-23
 - `tests/stack/stack_test.sh` — `database - role llm - no access to schema identity or database zitadel`
 - `tests/stack/stack_test.sh` — `CORS preflight - allowed origin - allow-origin set; foreign origin - not set`
 - `tests/waf/waf_test.go` — `gRPC, gRPC-web, Connect proto on the gRPC host - 200; gRPC on another or a lookalike host - 403; unknown content type - 403; SQL injection in a gRPC-web query - 403; two Content-Type headers - 400`
+- `tests/stack/stack_test.sh` — `llm - no or forged token - 401, no message stored; signed-in send - 5 deltas spread over >= 900 ms through edge and WAF, then done; other user - 404; SQL and HTML in content - 200, in the query - 403; facts on EVT_LLM without text; logs without text`
+- `tests/waf/waf_test.go` — `chat prompt - SQL, HTML, shell in content - 200; same text in another field, the query, a header, another route or GET - 403`
 - `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` and the stack test
 
 ## Changes
@@ -101,3 +108,4 @@ updated: 2026-10-23
 | 2026-10-28 | Mailpit catches Zitadel mail in local and ci (synthwerk#28, D-49). |
 | 2026-10-23 | The one-shot `zitadel-bootstrap` joins the stack; the admin PAT moves to the volume `zitadel-admin` (synthwerk#28 task 2). |
 | 2026-10-23 | Network `zitadel-hooks` (Zitadel to identity Actions) and the volume `zitadel-hooks` for the signing key (synthwerk#28 task 5). |
+| 2026-10-28 | llm streams chat answers: provider and token issuer from the env, WAF rule for prompts, `ollama-pull`, stack test with a local issuer (synthwerk#32). |

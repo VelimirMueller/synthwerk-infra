@@ -38,6 +38,9 @@ jobs:
           persist-credentials: false
       - name: Write .env with generated dev passwords
         run: scripts/init-env.sh
+      # llm trusts a local test issuer and answers with the fake provider (synthwerk#32).
+      - name: Set up the stack test token issuer
+        run: tests/stack/issuer.sh setup
       - name: Validate compose (default and ollama profile)
         run: |
           docker compose config --quiet
