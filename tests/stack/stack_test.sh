@@ -109,6 +109,27 @@ expect_status "hook path through the edge gets 404" 404 -X POST --data '{}' "$ED
 out=$(docker compose exec -T zitadel-login sh -c 'wget -q -S -O /dev/null --post-data "{}" http://identity:8081/internal/zitadel/actions 2>&1 | head -n 1' || true)
 if [[ "$out" == *"401"* ]]; then pass "unsigned hook call gets 401"; else fail "unsigned hook call: '$out'"; fi
 
+echo "# Zitadel mail goes to Mailpit (synthwerk#28, D-49)"
+# An invite code for a new user without a password: the invite mail must reach Mailpit.
+mail_to="invite.stack.$$@example.test"
+mail_user=$(docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  curlimages/curl:8.17.0 -c "curl -s -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+  -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/users/human \
+  -d '{\"username\":\"invite.stack.$$\",\"profile\":{\"givenName\":\"Invite\",\"familyName\":\"Stack\"},\"email\":{\"email\":\"$mail_to\",\"isVerified\":true}}'" \
+  | grep -o '"userId":"[0-9]*"' | cut -d'"' -f4 || true)
+docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  curlimages/curl:8.17.0 -c "curl -s -o /dev/null -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
+  -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/users/$mail_user/invite_code -d '{\"sendCode\":{}}'" || true
+mails=0
+for _ in $(seq 1 20); do
+  [[ -z "$mail_user" ]] && break
+  mails=$(curl -s --max-time 5 "http://127.0.0.1:${SYNTHWERK_MAILPIT_UI_PORT:-8025}/api/v1/search?query=to:$mail_to" | grep -o '"messages_count":[0-9]*' | cut -d: -f2 || echo 0)
+  ((${mails:-0} >= 1)) && break
+  sleep 3
+done
+if ((${mails:-0} >= 1)); then pass "invite mail for a new user is in Mailpit"; else fail "no invite mail in Mailpit for '${mail_user:-no user}'"; fi
+expect_status "Mailpit is not on the edge" 404 "$EDGE/api/v1/messages"
+
 echo "# database roles see only their own schema"
 # psql_as <role> <sql> [database]: run as a service role inside the database container.
 psql_as() {

@@ -14,7 +14,7 @@ updated: 2026-10-23
 # Local stack
 
 > **In 30 seconds**
-> - `docker compose up --wait` starts edge, WAF, bus, database, telemetry, pulse, Zitadel, identity and llm on one machine. Each has a health check.
+> - `docker compose up --wait` starts edge, WAF, bus, database, telemetry, pulse, Zitadel, Mailpit, identity and llm on one machine. Each has a health check.
 > - Zitadel is at `http://auth.localhost:8080`. identity and llm are at `/identity` and `/llm` on the edge, with CORS for the local frontends.
 > - Pulse streams the status of each part at `/pulse/v1/health/stream`. A stopped part shows as `down` within 30 s.
 
@@ -45,6 +45,7 @@ updated: 2026-10-23
 4. Open Grafana at `http://localhost:3000`.
 5. Watch the status: `curl -N http://127.0.0.1:8080/pulse/v1/health/stream`.
 6. Open Zitadel at `http://auth.localhost:8080`. Browsers and curl send `*.localhost` to 127.0.0.1.
+   Mails from Zitadel (invites, verification) land in Mailpit at `http://127.0.0.1:8025` (D-49).
 7. After a pull, run `scripts/init-env.sh` again. It appends new keys to `.env` and keeps the existing values.
 8. Stop with `docker compose down`. Add `--volumes` to delete the data. This also deletes the Zitadel instance.
 
@@ -97,5 +98,6 @@ updated: 2026-10-23
 | 2026-10-21 | First version. Pulse slot open for synthwerk#26. |
 | 2026-10-21 | Pulse joins the stack (synthwerk#24, synthwerk#26). |
 | 2026-10-23 | Zitadel, identity and llm join the stack, with database roles, CORS and gRPC through the WAF (SW-M2-0.4). |
+| 2026-10-28 | Mailpit catches Zitadel mail in local and ci (synthwerk#28, D-49). |
 | 2026-10-23 | The one-shot `zitadel-bootstrap` joins the stack; the admin PAT moves to the volume `zitadel-admin` (synthwerk#28 task 2). |
 | 2026-10-23 | Network `zitadel-hooks` (Zitadel to identity Actions) and the volume `zitadel-hooks` for the signing key (synthwerk#28 task 5). |

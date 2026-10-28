@@ -34,6 +34,7 @@ type fake struct {
 	targets  map[string]map[string]any // id -> target
 	execs    map[string][]string       // event -> target ids
 	policies map[string]map[string]any
+	smtp     map[string]map[string]any // id -> provider
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
 	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
@@ -46,6 +47,7 @@ func newFake() *fake {
 		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{},
+		smtp: map[string]map[string]any{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -218,6 +220,29 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cur[k] = v
 		}
 		reply(map[string]any{key: cur})
+	case p == "/admin/v1/email/_search":
+		var items []map[string]any
+		for _, v := range f.smtp {
+			items = append(items, v)
+		}
+		result(items)
+	case p == "/admin/v1/email/smtp":
+		id := f.id("smtp")
+		f.smtp[id] = map[string]any{"id": id, "description": in["description"], "state": "EMAIL_PROVIDER_INACTIVE",
+			"smtp": map[string]any{"host": in["host"], "senderAddress": in["senderAddress"], "tls": in["tls"]}}
+		reply(map[string]any{"id": id})
+	case strings.HasPrefix(p, "/admin/v1/email/") && strings.HasSuffix(p, "/_activate"):
+		id := strings.TrimSuffix(strings.TrimPrefix(p, "/admin/v1/email/"), "/_activate")
+		for k, v := range f.smtp {
+			v["state"] = "EMAIL_PROVIDER_INACTIVE"
+			if k == id {
+				v["state"] = "EMAIL_PROVIDER_ACTIVE"
+			}
+		}
+		reply(map[string]any{})
+	case strings.HasPrefix(p, "/admin/v1/email/") && r.Method == http.MethodDelete:
+		delete(f.smtp, strings.TrimPrefix(p, "/admin/v1/email/"))
+		reply(map[string]any{})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		reply(map[string]any{"code": 5, "message": "fake: no route " + r.Method + " " + p})
@@ -536,5 +561,44 @@ func TestWaitsForAStartingZitadel(t *testing.T) {
 	run(t, c, cfg)
 	if f.calls[0] != "GET /management/v1/orgs/me" || f.calls[1] != "GET /management/v1/orgs/me" {
 		t.Errorf("want the first read repeated, got %v", f.calls[:2])
+	}
+}
+
+func TestSMTPProviderIsMadeOnceAndActive(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_SMTP_HOST": "mailpit:1025"})
+	run(t, c, cfg)
+	run(t, c, cfg)
+	if len(f.smtp) != 1 {
+		t.Fatalf("providers %d, want 1", len(f.smtp))
+	}
+	for _, v := range f.smtp {
+		if v["state"] != "EMAIL_PROVIDER_ACTIVE" || v["smtp"].(map[string]any)["host"] != "mailpit:1025" || v["smtp"].(map[string]any)["tls"] != false {
+			t.Errorf("provider %v, want active, host mailpit:1025, no TLS", v)
+		}
+	}
+}
+
+func TestSMTPHostChangeReplacesTheProvider(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_SMTP_HOST": "mailpit:1025"})
+	run(t, c, cfg)
+	cfg.SMTPHost = "mailpit:2525"
+	run(t, c, cfg)
+	if len(f.smtp) != 1 {
+		t.Fatalf("providers %d, want 1", len(f.smtp))
+	}
+	for _, v := range f.smtp {
+		if v["smtp"].(map[string]any)["host"] != "mailpit:2525" || v["state"] != "EMAIL_PROVIDER_ACTIVE" {
+			t.Errorf("provider %v, want the new host, active", v)
+		}
+	}
+}
+
+func TestNoSMTPHostLeavesTheProviderAlone(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{})
+	run(t, c, cfg)
+	for _, call := range f.calls {
+		if strings.Contains(call, "/admin/v1/email") {
+			t.Errorf("unexpected email provider call %s", call)
+		}
 	}
 }

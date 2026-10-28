@@ -47,6 +47,11 @@ type Config struct {
 	IdentityHookKeyFile string
 	// IdentityHookKeyOwner is the uid that owns the key file: identity's nonroot user.
 	IdentityHookKeyOwner int
+	// SMTPHost is the mail server as host:port (Mailpit in local and ci, D-49).
+	// Empty = Zitadel's email provider is not touched (dev and prd set it up apart).
+	SMTPHost string
+	// SMTPSender is the sender address of Zitadel's mails.
+	SMTPSender string
 }
 
 // TestUser is a user that the bootstrap creates when TestUserPassword is set.
@@ -74,6 +79,8 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		IdentityHookKeyFile: or(getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE"), "/zitadel/hooks/identity-signing.key"),
 		// 65532: nonroot in the distroless image of synthwerk-identity.
 		IdentityHookKeyOwner: 65532,
+		SMTPHost:             getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
+		SMTPSender:           or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
 	}
 	if len(cfg.StudioRedirectURIs) == 0 {
 		return Config{}, errors.New("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: want at least one URI")
@@ -146,6 +153,12 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 			name string
 			fn   func() error
 		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }})
+	}
+	if cfg.SMTPHost != "" {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+		}{"email provider", func() error { return ensureSMTP(ctx, c, cfg) }})
 	}
 	if cfg.TestUserPassword != "" {
 		steps = append(steps, struct {
@@ -677,4 +690,66 @@ func waitReady(ctx context.Context, c *Client, out any) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// SMTPDescription names the email provider the bootstrap owns.
+const SMTPDescription = "synthwerk-local"
+
+// ensureSMTP points Zitadel's mail (invite codes, email verification) at an SMTP
+// server without TLS and login: Mailpit in local and ci (D-49). The provider is
+// found by its description, made when missing and activated.
+func ensureSMTP(ctx context.Context, c *Client, cfg Config) error {
+	var found struct {
+		Result []struct {
+			ID          string `json:"id"`
+			Description string `json:"description"`
+			State       string `json:"state"`
+			SMTP        struct {
+				Host          string `json:"host"`
+				SenderAddress string `json:"senderAddress"`
+			} `json:"smtp"`
+		} `json:"result"`
+	}
+	if err := c.Do(ctx, http.MethodPost, "/admin/v1/email/_search", "", map[string]any{}, &found); err != nil {
+		return err
+	}
+	id, state := "", ""
+	for _, p := range found.Result {
+		if p.Description != SMTPDescription {
+			continue
+		}
+		if p.SMTP.Host != cfg.SMTPHost || p.SMTP.SenderAddress != cfg.SMTPSender {
+			// Changed settings: drop the provider and make it again (the update
+			// endpoint is a full replace that wants the password).
+			if err := c.Do(ctx, http.MethodDelete, "/admin/v1/email/"+p.ID, "", nil, nil); err != nil {
+				return err
+			}
+			continue
+		}
+		id, state = p.ID, p.State
+	}
+	if id == "" {
+		var made struct {
+			ID string `json:"id"`
+		}
+		err := c.Do(ctx, http.MethodPost, "/admin/v1/email/smtp", "", map[string]any{
+			"description":   SMTPDescription,
+			"senderAddress": cfg.SMTPSender,
+			"senderName":    "Synthwerk",
+			"tls":           false,
+			"host":          cfg.SMTPHost,
+		}, &made)
+		if err != nil {
+			return err
+		}
+		id = made.ID
+	}
+	if state == "EMAIL_PROVIDER_ACTIVE" {
+		return nil
+	}
+	err := c.Do(ctx, http.MethodPost, "/admin/v1/email/"+id+"/_activate", "", map[string]any{}, nil)
+	if err != nil && !IsNotChanged(err) {
+		return err
+	}
+	return nil
 }
