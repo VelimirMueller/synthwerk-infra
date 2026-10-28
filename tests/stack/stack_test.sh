@@ -214,7 +214,8 @@ if tests/stack/issuer.sh active; then
   leak=$(sql "SELECT count(*) FROM llm.synthwerk_outbox WHERE event::text LIKE '%one two three%' OR event::text LIKE '%script%'")
   if [[ "$leak" == "0" ]]; then pass "facts hold no prompt or answer text"; else fail "facts with text: $leak"; fi
   out=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
-  if [[ "$out" == *'"name":"EVT_LLM"'* ]]; then pass "llm created the stream EVT_LLM"; else fail "no stream EVT_LLM on the bus"; fi
+  # The monitor prints indented JSON: "name": "EVT_LLM".
+  if grep -qE '"name": ?"EVT_LLM"' <<<"$out"; then pass "llm created the stream EVT_LLM"; else fail "no stream EVT_LLM on the bus"; fi
   logs=$(docker compose logs --no-color llm 2>&1)
   if grep -qE 'one two three|alert\(1\)|no token|forged' <<<"$logs"; then fail "llm logs hold prompt or answer text"; else pass "llm logs hold no prompt or answer text"; fi
 else
