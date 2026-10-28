@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -25,8 +26,9 @@ const (
 // Roles of the project. operator is the platform owner role (D-44).
 var Roles = []string{"operator", "owner", "admin", "member", "end_user"}
 
-// DemoGrantRoles are the roles the demo org may give to its users.
-var DemoGrantRoles = []string{"admin", "member", "end_user"}
+// DemoGrantRoles are the roles the demo org may give to its users. owner, admin
+// and member are org roles (synthwerk#29); operator stays with the platform org.
+var DemoGrantRoles = []string{"owner", "admin", "member", "end_user"}
 
 // Config is what Run sets up. Load it with ConfigFromEnv.
 type Config struct {
@@ -47,6 +49,10 @@ type Config struct {
 	IdentityHookKeyFile string
 	// IdentityHookKeyOwner is the uid that owns the key file: identity's nonroot user.
 	IdentityHookKeyOwner int
+	// IdentityPATFile receives the PAT of the machine user identity-sync (mode 0400,
+	// owner IdentityHookKeyOwner). identity writes org role changes to Zitadel user
+	// grants with it (synthwerk#29). Set up together with the hook.
+	IdentityPATFile string
 	// SMTPHost is the mail server as host:port (Mailpit in local and ci, D-49).
 	// Empty = Zitadel's email provider is not touched (dev and prd set it up apart).
 	SMTPHost string
@@ -64,6 +70,7 @@ type TestUser struct {
 // TestUsers are the local and ci users. Their login name is the bare user name.
 var TestUsers = []TestUser{
 	{UserName: "operator.test", Org: PlatformOrg, Roles: []string{"operator"}},
+	{UserName: "owner.demo", Org: DemoOrg, Roles: []string{"owner"}},
 	{UserName: "member.demo", Org: DemoOrg, Roles: []string{"member"}},
 }
 
@@ -79,6 +86,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		IdentityHookKeyFile: or(getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE"), "/zitadel/hooks/identity-signing.key"),
 		// 65532: nonroot in the distroless image of synthwerk-identity.
 		IdentityHookKeyOwner: 65532,
+		IdentityPATFile:      or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE"), "/zitadel/hooks/identity.pat"),
 		SMTPHost:             getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
 		SMTPSender:           or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
 	}
@@ -152,7 +160,10 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 		steps = append(steps, struct {
 			name string
 			fn   func() error
-		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }})
+		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }}, struct {
+			name string
+			fn   func() error
+		}{"identity machine user", func() error { return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID) }})
 	}
 	if cfg.SMTPHost != "" {
 		steps = append(steps, struct {
@@ -559,8 +570,77 @@ func or(v, def string) string {
 // IdentityHookTarget is the name of the Action target that calls identity.
 const IdentityHookTarget = "identity-user-created"
 
-// HookEvents are the Zitadel events identity receives (zitadelhook in synthwerk-identity).
-var HookEvents = []string{"user.human.added"}
+// HookEvents are the Zitadel events identity receives (zitadelhook in synthwerk-identity):
+// new users (#28) and the user grants it mirrors as org memberships (#29).
+var HookEvents = []string{"user.human.added", "user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"}
+
+// IdentitySyncUser is the machine user identity calls Zitadel with.
+const IdentitySyncUser = "identity-sync"
+
+// IdentitySyncRoles are its instance roles: read orgs, write user grants in every org.
+var IdentitySyncRoles = []string{"IAM_USER_MANAGER"}
+
+// IdentityPATLifetime is the lifetime of a new identity-sync PAT.
+var IdentityPATLifetime = 365 * 24 * time.Hour
+
+// ensureIdentitySync makes the machine user identity-sync in the platform org, gives
+// it IdentitySyncRoles and writes a PAT for identity when the PAT file is missing.
+// Zitadel shows a PAT only once, so an existing file is kept (root cannot read it:
+// it belongs to identity and has mode 0400).
+func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgID string) error {
+	var found struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	q := map[string]any{"queries": []any{map[string]any{"userNameQuery": map[string]any{"userName": IdentitySyncUser, "method": "TEXT_QUERY_METHOD_EQUALS"}}}}
+	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/_search", platformOrgID, q, &found); err != nil {
+		return err
+	}
+	var id string
+	if len(found.Result) > 0 {
+		id = found.Result[0].ID
+	} else {
+		var made struct {
+			UserID string `json:"userId"`
+		}
+		err := c.Do(ctx, http.MethodPost, "/management/v1/users/machine", platformOrgID, map[string]any{
+			"userName":        IdentitySyncUser,
+			"name":            IdentitySyncUser,
+			"description":     "synthwerk-identity writes org roles to user grants (synthwerk#29)",
+			"accessTokenType": "ACCESS_TOKEN_TYPE_BEARER",
+		}, &made)
+		if err != nil {
+			return err
+		}
+		id = made.UserID
+	}
+	member := map[string]any{"userId": id, "roles": IdentitySyncRoles}
+	if err := c.Do(ctx, http.MethodPost, "/admin/v1/members", "", member, nil); IsAlreadyExists(err) {
+		err = c.Do(ctx, http.MethodPut, "/admin/v1/members/"+id, "", map[string]any{"roles": IdentitySyncRoles}, nil)
+		if err != nil && !IsNotChanged(err) {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if _, err := os.Stat(cfg.IdentityPATFile); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	var pat struct {
+		Token string `json:"token"`
+	}
+	exp := time.Now().Add(IdentityPATLifetime).UTC().Format(time.RFC3339)
+	if err := c.Do(ctx, http.MethodPost, "/management/v1/users/"+id+"/pats", platformOrgID, map[string]any{"expirationDate": exp}, &pat); err != nil {
+		return err
+	}
+	if pat.Token == "" {
+		return fmt.Errorf("user %s: Zitadel returned no PAT", IdentitySyncUser)
+	}
+	return writeKey(cfg.IdentityPATFile, pat.Token, cfg.IdentityHookKeyOwner)
+}
 
 // ensureIdentityHook creates or updates the target, writes its signing key for
 // identity and points the event executions at it. The bootstrap owns these

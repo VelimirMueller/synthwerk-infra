@@ -8,7 +8,7 @@ paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "z
 api: []
 events: []
 mcp: []
-updated: 2026-10-23
+updated: 2026-10-28
 ---
 
 # Local stack
@@ -32,12 +32,14 @@ updated: 2026-10-23
 - Runs the one-shot `zitadel-bootstrap` after Zitadel is healthy: orgs, project, roles, studio app and sign-in policies as code. See [Zitadel setup as code](zitadel-bootstrap.md).
 - Starts Zitadel v4.20.0 (`zitadel`) and its Login UI v2 (`zitadel-login`), per D-42. The edge routes them by host name: `/` and `/ui/v2/login*` go to the login UI, everything else goes to the API over h2c.
 - Starts synthwerk-identity and synthwerk-llm from their GHCR images, pinned by digest. `/llm` uses the stream chain (no buffering) for SSE.
-- Adds the CORS middleware `edge-cors` on `/identity` and `/llm`. Origins come from `SYNTHWERK_CORS_ORIGINS`. Methods are GET, POST and OPTIONS. Headers are `Authorization` and `Content-Type`. No credentials.
+- Adds the CORS middleware `edge-cors` on `/identity` and `/llm`. Origins come from `SYNTHWERK_CORS_ORIGINS`. Methods are GET, POST, PATCH and OPTIONS. Headers are `Authorization` and `Content-Type`. No credentials.
 - Lets gRPC, gRPC-web and Connect pass the WAF on the Zitadel host only (`SYNTHWERK_WAF_GRPC_HOSTS`, set from the Zitadel domain). There they are on the CRS content-type list, and their binary body is not inspected. The URI, query and headers are still checked. Every other host keeps the CRS defaults.
 - Answers 400 to a request with more than one `Content-Type` header.
 - Leaves JetStream streams (for example `EVT_LLM`) to the services: each service creates its own stream at start, like pulse.
 - Runs llm with the provider from `SYNTHWERK_LLM_PROVIDER` (default `ollama`; `fake` in the CI stack test). The model of the alias `default` is `SYNTHWERK_LLM_DEFAULT_MODEL` (default `qwen3.5:4b`). The `ollama` profile also runs the one-shot `ollama-pull`, which pulls that model.
 - Lets a chat prompt pass the WAF: only the JSON field `content` of `POST /llm/v1/conversations/<uuid>/messages` skips the CRS rules (rule 900230). The URI, query, headers and other fields are still checked.
+- Lets PATCH pass the WAF only on `/identity/v1/orgs/<uuid>/members/<user id>` (org role change, synthwerk#29, rule 900231). CRS still checks the body. Every other route allows GET, HEAD, POST and OPTIONS only.
+- identity checks tokens like llm (stack test: the local issuer), writes role changes to Zitadel as `identity-sync`, and publishes its outbox to `EVT_IDENTITY`.
 - `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm at it. Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
 
 ## How to use
@@ -109,3 +111,4 @@ updated: 2026-10-23
 | 2026-10-23 | The one-shot `zitadel-bootstrap` joins the stack; the admin PAT moves to the volume `zitadel-admin` (synthwerk#28 task 2). |
 | 2026-10-23 | Network `zitadel-hooks` (Zitadel to identity Actions) and the volume `zitadel-hooks` for the signing key (synthwerk#28 task 5). |
 | 2026-10-28 | llm streams chat answers: provider and token issuer from the env, WAF rule for prompts, `ollama-pull`, stack test with a local issuer (synthwerk#32). |
+| 2026-10-28 | Org roles: identity token check, Zitadel grant writes as `identity-sync`, relay to `EVT_IDENTITY`, PATCH on the member route through CORS and WAF (synthwerk#29). |

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,8 @@ type fake struct {
 	execs    map[string][]string       // event -> target ids
 	policies map[string]map[string]any
 	smtp     map[string]map[string]any // id -> provider
+	members  map[string][]string       // instance member user id -> roles
+	pats     int
 	// notChanged answers every PUT with Zitadel's "not changed" error.
 	notChanged bool
 	// unavailable answers the first n calls with 503, code 14, like a starting Zitadel.
@@ -47,7 +50,7 @@ func newFake() *fake {
 		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{},
-		smtp: map[string]map[string]any{},
+		smtp: map[string]map[string]any{}, members: map[string][]string{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -151,6 +154,25 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			items = append(items, map[string]any{"id": id})
 		}
 		result(items)
+	case p == "/management/v1/users/machine":
+		id := f.id("m")
+		f.users[org+"/"+in["userName"].(string)] = id
+		reply(map[string]any{"userId": id})
+	case p == "/admin/v1/members" && r.Method == http.MethodPost:
+		uid := in["userId"].(string)
+		if f.members[uid] != nil {
+			w.WriteHeader(http.StatusConflict)
+			reply(map[string]any{"code": 6, "message": "already exists"})
+			return
+		}
+		f.members[uid] = strSlice(in["roles"])
+		reply(map[string]any{})
+	case strings.HasPrefix(p, "/admin/v1/members/") && r.Method == http.MethodPut:
+		f.members[strings.TrimPrefix(p, "/admin/v1/members/")] = strSlice(in["roles"])
+		reply(map[string]any{})
+	case strings.HasPrefix(p, "/management/v1/users/") && strings.HasSuffix(p, "/pats"):
+		f.pats++
+		reply(map[string]any{"tokenId": f.id("pat"), "token": fmt.Sprintf("pat-%d", f.pats)})
 	case p == "/management/v1/users/human/_import":
 		id := f.id("u")
 		f.users[org+"/"+in["userName"].(string)] = id
@@ -500,7 +522,44 @@ func hookSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
 	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL": "http://identity-hooks:8081/internal/zitadel/actions"})
 	cfg.IdentityHookKeyFile = filepath.Join(t.TempDir(), "identity-signing.key")
 	cfg.IdentityHookKeyOwner = os.Getuid() // tests run unprivileged
+	cfg.IdentityPATFile = filepath.Join(t.TempDir(), "identity.pat")
 	return f, c, cfg
+}
+
+func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	if id == "" || !slices.Equal(f.members[id], bootstrap.IdentitySyncRoles) {
+		t.Fatalf("machine user %q, instance roles %v", id, f.members[id])
+	}
+	pat, err := os.ReadFile(cfg.IdentityPATFile)
+	if err != nil || string(pat) != "pat-1" {
+		t.Fatalf("pat file %q, %v", pat, err)
+	}
+	if st, _ := os.Stat(cfg.IdentityPATFile); st.Mode().Perm() != 0o400 {
+		t.Errorf("pat file mode %v, want 0400", st.Mode().Perm())
+	}
+	run(t, c, cfg)
+	if f.pats != 1 || len(f.users) == 0 {
+		t.Errorf("second run made %d PATs, want 1 in total", f.pats)
+	}
+	for _, ev := range []string{"user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"} {
+		if len(f.execs[ev]) != 1 {
+			t.Errorf("no execution for %s", ev)
+		}
+	}
+}
+
+func TestDemoOrgMayGrantOwner(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_TEST_USER_PASSWORD": "Test-Password-1!"})
+	r := run(t, c, cfg)
+	if !slices.Contains(f.grants[r.DemoOrgID], "owner") || slices.Contains(f.grants[r.DemoOrgID], "operator") {
+		t.Fatalf("demo grant %v: want owner, not operator", f.grants[r.DemoOrgID])
+	}
+	if id := r.TestUserIDs["owner.demo"]; id == "" || !slices.Equal(f.ugrants[id], []string{"owner"}) {
+		t.Fatalf("owner.demo %q grants %v", id, f.ugrants[id])
+	}
 }
 
 func TestIdentityHookIsSetUpOnce(t *testing.T) {

@@ -304,6 +304,30 @@ func TestCheck_ChatPrompt_PassesOnlyInContent(t *testing.T) {
 	}
 }
 
+func TestCheck_MemberRolePatch_PassesOnlyOnItsRoute(t *testing.T) {
+	h := blockingHandler(t)
+	jsonHeader := map[string]string{"Content-Type": "application/json"}
+	route := "/identity/v1/orgs/0199f3a1-2c3d-7e4f-8a5b-6c7d8e9f0a1b/members/396370217707541255"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, forwardAuth(http.MethodPatch, route, `{"role":"admin"}`, jsonHeader))
+	if rec.Code != http.StatusOK {
+		t.Errorf("PATCH role change: status %d, want 200", rec.Code)
+	}
+	block := map[string]*http.Request{
+		"PATCH on another route":     forwardAuth(http.MethodPatch, "/identity/v1/orgs/0199f3a1-2c3d-7e4f-8a5b-6c7d8e9f0a1b", `{"role":"admin"}`, jsonHeader),
+		"PATCH on the stub":          forwardAuth(http.MethodPatch, "/stub/notes", `{"role":"admin"}`, jsonHeader),
+		"DELETE on the member route": forwardAuth(http.MethodDelete, route, "", nil),
+		"attack in the PATCH body":   forwardAuth(http.MethodPatch, route, `{"role":"' OR 1=1 --; cat /etc/passwd"}`, jsonHeader),
+	}
+	for name, req := range block {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", name, rec.Code)
+		}
+	}
+}
+
 // A login UI server action body is parsed as JSON. A body that is not JSON is refused
 // (the body processor error answers 400), so text/plain cannot skip the inspection.
 func TestCheck_LoginUIActionNotJSON_Refused(t *testing.T) {

@@ -168,6 +168,13 @@ func grpcRules(hosts []string) []string {
 const ChatContentRule = `SecRule REQUEST_METHOD "@streq POST" "id:900230,phase:1,pass,t:none,nolog,chain"` + "\n" +
 	`  SecRule REQUEST_FILENAME "@rx ^/llm/v1/conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/messages$" "t:none,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.content"`
 
+// MemberRoleRule lets PATCH through for the org role change of synthwerk-identity
+// (#29): PATCH /identity/v1/orgs/<uuid>/members/<user id>. CRS allows only GET, HEAD,
+// POST and OPTIONS (911100); every other route keeps that list. The body is still
+// checked by every CRS rule.
+const MemberRoleRule = `SecRule REQUEST_METHOD "@streq PATCH" "id:900231,phase:1,pass,t:none,nolog,chain"` + "\n" +
+	`  SecRule REQUEST_FILENAME "@rx ^/identity/v1/orgs/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/members/[A-Za-z0-9_-]{1,128}$" "t:none,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PATCH'"`
+
 // Directives returns the SecLang directives for cfg. CRS is read from the
 // embedded coraza-coreruleset files, so the container needs no rule files.
 func Directives(cfg Config) string {
@@ -186,7 +193,7 @@ func Directives(cfg Config) string {
 		fmt.Sprintf(`SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d"`, cfg.ParanoiaLevel),
 	}
 	d = append(d, grpcRules(cfg.GRPCHosts)...)
-	d = append(d, ChatContentRule, "Include @owasp_crs/*.conf")
+	d = append(d, ChatContentRule, MemberRoleRule, "Include @owasp_crs/*.conf")
 	return strings.Join(d, "\n")
 }
 

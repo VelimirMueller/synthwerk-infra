@@ -47,7 +47,7 @@ http:
 {{- range $origin := splitList "," (env "SYNTHWERK_CORS_ORIGINS") }}
           - {{ trim $origin | quote }}
 {{- end }}
-        accessControlAllowMethods: [GET, POST, OPTIONS]
+        accessControlAllowMethods: [GET, POST, PATCH, OPTIONS]
         accessControlAllowHeaders: [Authorization, Content-Type]
         accessControlAllowCredentials: false
         accessControlMaxAge: 600

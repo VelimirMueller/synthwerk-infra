@@ -8,7 +8,7 @@ paths: ["zitadel/**", "cmd/zitadel-bootstrap/**", "compose.yaml", "tests/zitadel
 api: []
 events: []
 mcp: []
-updated: 2026-10-23
+updated: 2026-10-28
 ---
 
 # Zitadel setup as code
@@ -30,7 +30,9 @@ updated: 2026-10-23
 - Sets the access token lifetime to 300 s.
 - Creates the Action target `identity-user-created` (`http://identity-hooks:8081/internal/zitadel/actions`) and points the event `user.human.added` at it (synthwerk#28 task 5).
 - Writes the target signing key to `identity-signing.key` (mode 0400, owner 65532) in the volume `zitadel-hooks`, which identity reads. Zitadel returns the key in every target search, so each run can write it.
-- Creates the test users `operator.test` (platform, `operator`) and `member.demo` (demo, `member`), only when `SYNTHWERK_ZITADEL_TEST_USER_PASSWORD` is set.
+- Creates the test users `operator.test` (platform, `operator`), `owner.demo` (demo, `owner`) and `member.demo` (demo, `member`), only when `SYNTHWERK_ZITADEL_TEST_USER_PASSWORD` is set.
+- The demo org may grant `owner`, `admin`, `member` and `end_user` (synthwerk#29).
+- With the identity hook: Action executions for `user.human.added` and the user grant events (`user.grant.added|changed|removed|cascade.removed`), and the machine user `identity-sync` (instance role `IAM_USER_MANAGER`). Its PAT goes to `/zitadel/hooks/identity.pat` (mode 0400, owner 65532) only when the file is missing; identity writes role changes to user grants with it.
 
 ## How to use
 
@@ -83,7 +85,9 @@ updated: 2026-10-23
 - `tests/zitadel/bootstrap_test.go` — `no test user password - no users; bad PAT - error, no create; wildcard or relative URI - error`
 - `tests/zitadel/bootstrap_test.go` — `identity hook - second run - no target create, no execution change; new URL - target updated; no URL - no target`
 - `tests/stack/stack_test.sh` — `new user - one user.created row in the identity outbox; hook path through the edge - 404; unsigned hook call - 401`
-- `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - both test users get org and role claims; zitadel-login - cannot read the admin PAT`
+- `tests/zitadel/bootstrap_test.go` — `identity-sync - one machine user, instance role, one PAT over two runs; demo org may grant owner`
+- `tests/stack/stack_test.sh` — `org roles - member PATCH 403, owner PATCH 200, role_changed in the outbox and on EVT_IDENTITY, Zitadel grant changed`
+- `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - all test users get org and role claims; zitadel-login - cannot read the admin PAT`
 
 ## Changes
 
@@ -92,3 +96,4 @@ updated: 2026-10-23
 | 2026-10-23 | First version (synthwerk#28 task 2). |
 | 2026-10-28 | Email provider for Mailpit, MFA limitation in ADR-0002 (synthwerk#28). |
 | 2026-10-23 | Action target for identity, network `zitadel-hooks`, narrowed deny list (synthwerk#28 task 5). |
+| 2026-10-28 | Org roles: demo grant has `owner`, test user `owner.demo`, grant event executions, machine user `identity-sync` and its PAT (synthwerk#29). |
