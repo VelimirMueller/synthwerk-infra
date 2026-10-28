@@ -52,7 +52,7 @@ pulse_summary() {
     return 1
   fi
   if command -v jq >/dev/null; then
-    printf '%s' "$body" | jq -r '.targets[] | "\(.status)\t\(.target)"' | column -t
+    printf '%s' "$body" | jq -r '.targets[] | "\(.status)\t\(.target)"' | { column -t 2>/dev/null || cat; }
   else
     printf '%s\n' "$body"
   fi
