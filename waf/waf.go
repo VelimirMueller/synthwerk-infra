@@ -91,6 +91,10 @@ const GRPCContentTypes = "|application/x-www-form-urlencoded| |multipart/form-da
 	" |application/grpc| |application/grpc+proto| |application/grpc-web| |application/grpc-web+proto| |application/grpc-web-text| |application/grpc-web-text+proto|" +
 	" |application/proto| |application/connect+proto| |application/connect+json|"
 
+// LoginUIContentTypes is the CRS v4 default list of request content types. Rule
+// 900223 adds text/plain to it for login UI server actions only.
+const LoginUIContentTypes = "|application/x-www-form-urlencoded| |multipart/form-data| |multipart/related| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/cloudevents+json| |application/cloudevents-batch+json|"
+
 // grpcRules returns the rules for the GRPCHosts, or only 900222 without hosts.
 // 900220 and 900221 apply only to a request for a GRPCHosts host AND a gRPC
 // method path (/<package>.<Service>/<Method>), so the login UI on the same host
@@ -105,6 +109,26 @@ const GRPCContentTypes = "|application/x-www-form-urlencoded| |multipart/form-da
 //   - 900222: more than one Content-Type header gets 400 on every host, so a
 //     second header cannot switch off the body check for a body the backend
 //     reads as something else.
+//   - 900223: a Zitadel login UI v2 server action (POST under /ui/v2/login/ with
+//     a Next-Action header) on a GRPCHosts host may send text/plain: Next.js
+//     posts its JSON argument list with that type. CRS 920420 refuses
+//     text/plain, so without this rule nobody can sign in through the edge. The
+//     body is parsed as JSON, so it is still inspected; a body that is not
+//     JSON fails the CRS body check (200002). CRS 942290 (MongoDB operators
+//     like "$ne") is off for these requests only: Next.js writes "$"-prefixed
+//     references ("$undefined", "$K1") into every argument list. The other
+//     SQL injection rules stay on.
+//   - 900224: on a GRPCHosts host under /ui/v2/login/, CRS 943120 (session
+//     fixation: a "sessionId" argument without a Referer) skips the argument name sessionId.
+//     Login UI v2 passes its own Zitadel session id in that argument on every
+//     step and checks it against its signed session cookie. Every other rule
+//     still reads sessionId.
+//   - 900225: on a GRPCHosts host, CRS 934110 (SSRF: a URL to a local or
+//     private address in an argument) skips redirect_uri and
+//     post_logout_redirect_uri on /oauth/v2/authorize, /oauth/v2/token and
+//     /oidc/v1/end_session.
+//     Zitadel only redirects to URIs registered on the app (exact match), and
+//     local studio callbacks are http://localhost:3000/... .
 func grpcRules(hosts []string) []string {
 	rules := []string{
 		`SecRule &REQUEST_HEADERS:Content-Type "@gt 1" "id:900222,phase:1,deny,status:400,t:none,log,msg:'More than one Content-Type header'"`,
@@ -123,6 +147,16 @@ func grpcRules(hosts []string) []string {
 			fmt.Sprintf(`  SecAction "setvar:'tx.allowed_request_content_type=%s'"`, GRPCContentTypes),
 		host+` "id:900221,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+path+"\n"+
 			`  SecRule REQUEST_HEADERS:Content-Type "@rx ^application/(?:grpc(?:-web)?(?:\+proto)?|connect\+proto|proto)(?:;|$)" "t:none,t:lowercase,ctl:requestBodyAccess=Off"`,
+		host+` "id:900223,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+
+			`  SecRule REQUEST_METHOD "@streq POST" "t:none,chain"`+"\n"+
+			`  SecRule REQUEST_FILENAME "@beginsWith /ui/v2/login/" "t:none,chain"`+"\n"+
+			`  SecRule &REQUEST_HEADERS:Next-Action "@eq 1" "t:none,chain"`+"\n"+
+			`  SecRule REQUEST_HEADERS:Content-Type "@rx ^text/plain(?:;\s*charset=utf-8)?$" "t:none,t:lowercase,ctl:requestBodyProcessor=JSON,ctl:ruleRemoveById=942290,`+
+			fmt.Sprintf(`setvar:'tx.allowed_request_content_type=%s |text/plain|'"`, LoginUIContentTypes),
+		host+` "id:900224,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+
+			`  SecRule REQUEST_FILENAME "@beginsWith /ui/v2/login/" "t:none,ctl:ruleRemoveTargetById=943120;ARGS_NAMES:sessionId"`,
+		host+` "id:900225,phase:1,pass,t:none,t:lowercase,nolog,chain"`+"\n"+
+			`  SecRule REQUEST_FILENAME "@rx ^/(?:oauth/v2/(?:authorize|token)|oidc/v1/end_session)$" "t:none,ctl:ruleRemoveTargetById=934110;ARGS:redirect_uri,ctl:ruleRemoveTargetById=934110;ARGS:post_logout_redirect_uri"`,
 	)
 }
 
