@@ -8,7 +8,7 @@
 #   tests/stack/issuer.sh setup            key + JWKS, llm and identity env lines in .env (before compose up)
 #   tests/stack/issuer.sh mint <sub> <org> [role,...]
 #                                          print a token valid for 5 minutes; roles granted in <org>
-#   tests/stack/issuer.sh active           exit 0 when .env points llm at this issuer
+#   tests/stack/issuer.sh active           exit 0 when .env points llm and identity at this issuer
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -48,6 +48,8 @@ setup() {
 
 mint() {
   local sub=$1 org=$2 roles=${3:-} now head body sig claim="" r
+  # The claims are built as text: only id and role characters are allowed.
+  [[ "$sub$org" =~ ^[A-Za-z0-9_-]+$ && "$roles" =~ ^[a-z_,]*$ ]] || { echo "mint: bad sub, org or role" >&2; exit 2; }
   now=$(date +%s)
   # Zitadel roles claim: {"<role>":{"<org>":"<org>.stack.test"}}.
   if [[ -n "$roles" ]]; then
@@ -64,6 +66,6 @@ mint() {
 case "${1:-}" in
   setup) setup ;;
   mint) mint "${2:?sub}" "${3:?org}" "${4:-}" ;;
-  active) grep -q "^SYNTHWERK_LLM_OIDC_ISSUER=$ISSUER$" .env 2>/dev/null ;;
+  active) grep -q "^SYNTHWERK_LLM_OIDC_ISSUER=$ISSUER$" .env 2>/dev/null && grep -q "^SYNTHWERK_IDENTITY_OIDC_ISSUER=$ISSUER$" .env ;;
   *) echo "usage: $0 setup | mint <sub> <org> [role,...] | active" >&2; exit 2 ;;
 esac
