@@ -26,3 +26,7 @@ exceptions:
   - rule: GOV-ENV-01
     value: not-created-yet
     reason: The environments dev, stg and prd do not exist yet; the control repo creates them (fleet-standard#7).
+  - rule: CI-UNIT-03
+    value:
+      lines: 70
+    reason: Go tests cover 70.8 % of the waf and zitadel packages (coverpkg) today; the floor holds the measured value until the suite reaches 80 %.
