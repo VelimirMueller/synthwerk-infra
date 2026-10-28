@@ -28,18 +28,17 @@ setup() {
   printf '{"keys":[{"kty":"RSA","kid":"%s","alg":"RS256","use":"sig","n":"%s","e":"AQAB"}]}\n' "$KID" "$n" >"$JWKS"
   chmod 644 "$JWKS"
   touch .env
-  local line key
-  for line in \
+  # One pass: drop the five keys, then append them. A last line without a newline
+  # would otherwise merge with the first appended key.
+  grep -v -E '^SYNTHWERK_LLM_(OIDC_ISSUER|OIDC_AUDIENCE|JWKS_URL|PROVIDER|FAKE_DELAY)=' .env >.env.tmp || true
+  [[ -s .env.tmp && -n "$(tail -c 1 .env.tmp)" ]] && printf '\n' >>.env.tmp
+  printf '%s\n' \
     "SYNTHWERK_LLM_OIDC_ISSUER=$ISSUER" \
     "SYNTHWERK_LLM_OIDC_AUDIENCE=$AUDIENCE" \
     "SYNTHWERK_LLM_JWKS_URL=http://stub:8080/issuer/jwks.json" \
     "SYNTHWERK_LLM_PROVIDER=fake" \
-    "SYNTHWERK_LLM_FAKE_DELAY=300ms"; do
-    key=${line%%=*}
-    grep -v "^$key=" .env >.env.tmp || true
-    printf '%s\n' "$line" >>.env.tmp
-    mv .env.tmp .env
-  done
+    "SYNTHWERK_LLM_FAKE_DELAY=300ms" >>.env.tmp
+  mv .env.tmp .env
   echo "issuer ready: llm trusts $ISSUER (fake provider)"
 }
 
