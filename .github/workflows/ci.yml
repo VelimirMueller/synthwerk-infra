@@ -112,6 +112,7 @@ jobs:
       - name: Validate the compose files
         run: |
           scripts/init-env.sh
+          tests/stack/issuer.sh setup
           docker compose config --quiet
           docker compose --profile ollama config --quiet
       - name: Run the stack test against the whole compose stack

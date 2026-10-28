@@ -12,6 +12,8 @@ log=$(mktemp)
 trap 'rm -f "$log"; docker compose down --volumes >/dev/null 2>&1 || true' EXIT
 
 scripts/init-env.sh
+# llm trusts the local test issuer and answers with the fake provider (synthwerk#32).
+tests/stack/issuer.sh setup
 docker compose up --build --wait --wait-timeout 300
 
 # PIPESTATUS keeps the exit code of the stack test itself, not the one of tee.
