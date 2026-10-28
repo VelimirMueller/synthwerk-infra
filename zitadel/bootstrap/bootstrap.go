@@ -718,9 +718,10 @@ func ensureSMTP(ctx context.Context, c *Client, cfg Config) error {
 		if p.Description != SMTPDescription {
 			continue
 		}
-		if p.SMTP.Host != cfg.SMTPHost || p.SMTP.SenderAddress != cfg.SMTPSender {
-			// Changed settings: drop the provider and make it again (the update
-			// endpoint is a full replace that wants the password).
+		if id != "" || p.SMTP.Host != cfg.SMTPHost || p.SMTP.SenderAddress != cfg.SMTPSender {
+			// A second provider with this name, or changed settings: drop it (the
+			// update endpoint is a full replace that wants the password). Zitadel
+			// deletes an active provider too; the new one is activated below.
 			if err := c.Do(ctx, http.MethodDelete, "/admin/v1/email/"+p.ID, "", nil, nil); err != nil {
 				return err
 			}

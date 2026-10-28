@@ -328,11 +328,11 @@ services:
         condition: service_healthy
       identity:
         condition: service_healthy
-      mailpit:
-        condition: service_healthy
 
   # Mailpit: catches every mail Zitadel sends in local and ci (D-49). Web UI and API
-  # on http://127.0.0.1:8025 (GET /api/v1/messages). Never on dev or prd.
+  # on http://127.0.0.1:8025 (GET /api/v1/messages). The bootstrap does not wait for
+  # it: Zitadel queues mail and retries. A dev or prd override must drop this
+  # service and set SYNTHWERK_ZITADEL_SMTP_HOST= (empty); mail there goes through Resend.
   mailpit:
     <<: *hardening
     image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387

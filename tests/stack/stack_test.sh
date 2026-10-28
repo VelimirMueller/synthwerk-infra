@@ -116,14 +116,15 @@ mail_user=$(docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/
   curlimages/curl:8.17.0 -c "curl -s -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
   -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/users/human \
   -d '{\"username\":\"invite.stack.$$\",\"profile\":{\"givenName\":\"Invite\",\"familyName\":\"Stack\"},\"email\":{\"email\":\"$mail_to\",\"isVerified\":true}}'" \
-  | grep -o '"userId":"[0-9]*"' | cut -d'"' -f4 || true)
-docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
+  | grep -o '"userId":"[0-9][0-9]*"' | cut -d'"' -f4 || true)
+[[ -n "$mail_user" ]] || fail "invite test: could not create a user"
+[[ -n "$mail_user" ]] && docker run --rm --network synthwerk_app -v synthwerk_zitadel-admin:/b:ro --user 0 --entrypoint sh \
   curlimages/curl:8.17.0 -c "curl -s -o /dev/null -H 'Host: $auth_domain' -H \"Authorization: Bearer \$(cat /b/admin.pat)\" \
   -H 'Content-Type: application/json' -X POST http://zitadel:8080/v2/users/$mail_user/invite_code -d '{\"sendCode\":{}}'" || true
 mails=0
 for _ in $(seq 1 20); do
   [[ -z "$mail_user" ]] && break
-  mails=$(curl -s --max-time 5 "http://127.0.0.1:${SYNTHWERK_MAILPIT_UI_PORT:-8025}/api/v1/search?query=to:$mail_to" | grep -o '"messages_count":[0-9]*' | cut -d: -f2 || echo 0)
+  mails=$(curl -s --max-time 5 "http://127.0.0.1:${SYNTHWERK_MAILPIT_UI_PORT:-8025}/api/v1/search?query=to%3A$mail_to" | grep -o '"messages_count":[0-9]*' | cut -d: -f2 || echo 0)
   ((${mails:-0} >= 1)) && break
   sleep 3
 done

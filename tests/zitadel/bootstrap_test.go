@@ -602,3 +602,14 @@ func TestNoSMTPHostLeavesTheProviderAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestDuplicateSMTPProviderIsDropped(t *testing.T) {
+	f, c, cfg := setup(t, map[string]string{"SYNTHWERK_ZITADEL_SMTP_HOST": "mailpit:1025"})
+	run(t, c, cfg)
+	f.smtp["smtp-dup"] = map[string]any{"id": "smtp-dup", "description": bootstrap.SMTPDescription, "state": "EMAIL_PROVIDER_INACTIVE",
+		"smtp": map[string]any{"host": "mailpit:1025", "senderAddress": cfg.SMTPSender}}
+	run(t, c, cfg)
+	if len(f.smtp) != 1 {
+		t.Fatalf("providers %d, want 1", len(f.smtp))
+	}
+}
