@@ -97,7 +97,7 @@ func TestCheck_KnownAttack_Returns403(t *testing.T) {
 			map[string]string{"Content-Type": "application/json"}),
 		"localhost URL in another argument of authorize": forwardAuth(http.MethodGet, "/oauth/v2/authorize?client_id=1&redirect_uri=https%3A%2F%2Fstudio.example&login_hint=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data", "",
 			map[string]string{"X-Forwarded-Host": grpcHost}),
-		"localhost redirect_uri on another host": forwardAuth(http.MethodGet, "/stub/oauth/v2/authorize?redirect_uri=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data", "", nil),
+		"localhost redirect_uri on another host":    forwardAuth(http.MethodGet, "/stub/oauth/v2/authorize?redirect_uri=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data", "", nil),
 		"sessionId without Referer on another host": forwardAuth(http.MethodGet, "/stub/?sessionId=397091455929197316", "", nil),
 		"gRPC host with a lookalike name": forwardAuth(http.MethodPost, "/zitadel.admin.v1.AdminService/Healthz", grpcFrame,
 			map[string]string{"Content-Type": "application/grpc", "X-Forwarded-Host": "auth.localhost.evil.example"}),
