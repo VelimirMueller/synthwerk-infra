@@ -314,6 +314,9 @@ services:
       # Action target for identity (#28 task 5). Zitadel resolves the name when it
       # saves the target, so identity must be up on zitadel-hooks first.
       SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: http://identity-hooks:8081/internal/zitadel/actions
+      # Server-side MFA gate (synthwerk#94, ADR-0002 option C). Off until the pinned
+      # identity image has the gate routes: with an older image every sign-in fails.
+      SYNTHWERK_ZITADEL_MFA_GATE: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
       # Mail (invite codes, email verification) goes to Mailpit in local and ci (D-49).
       # Dev and prd set this to empty and keep their provider (Resend) out of the bootstrap.
       SYNTHWERK_ZITADEL_SMTP_HOST: ${SYNTHWERK_ZITADEL_SMTP_HOST-mailpit:1025}
@@ -370,6 +373,11 @@ services:
       # The edge routes /identity/* to :8080 and never to this port.
       SYNTHWERK_IDENTITY_HOOKS_ADDR: ":8081"
       SYNTHWERK_IDENTITY_ZITADEL_SIGNING_KEY_FILE: /zitadel/hooks/identity-signing.key
+      # MFA gate (synthwerk#94, ADR-0002 option C): signing keys of the two targets.
+      # Read only when the image has the gate routes; zitadel-bootstrap writes them
+      # when SYNTHWERK_ZITADEL_MFA_GATE=true.
+      SYNTHWERK_IDENTITY_MFA_GATE_KEY_FILE: /zitadel/hooks/identity-mfa-gate.key
+      SYNTHWERK_IDENTITY_TOKEN_CLAIMS_KEY_FILE: /zitadel/hooks/identity-token-claims.key
       # Org roles (synthwerk#29). Token check like llm: Zitadel by default; the stack
       # test points these at its own issuer (tests/stack/issuer.sh).
       SYNTHWERK_IDENTITY_OIDC_ISSUER: ${SYNTHWERK_IDENTITY_OIDC_ISSUER:-http://auth.localhost:8080}

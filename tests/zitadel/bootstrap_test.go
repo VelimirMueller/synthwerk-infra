@@ -36,7 +36,8 @@ type fake struct {
 	ugrants  map[string][]string // user id -> role keys
 	secrets  int
 	targets  map[string]map[string]any // id -> target
-	execs    map[string][]string       // event -> target ids
+	execs    map[string][]string       // condition key (event:x, request:m, function:f) -> target ids
+	conds    map[string]any            // condition key -> condition as sent
 	policies map[string]map[string]any
 	smtp     map[string]map[string]any // id -> provider
 	members  map[string][]string       // instance member user id -> roles
@@ -54,7 +55,7 @@ func newFake() *fake {
 		orgs: map[string]string{"synthwerk": "o-platform"}, projects: map[string]string{},
 		roles: map[string]bool{}, grants: map[string][]string{}, apps: map[string]string{},
 		users: map[string]string{}, ugrants: map[string][]string{},
-		targets: map[string]map[string]any{}, execs: map[string][]string{},
+		targets: map[string]map[string]any{}, execs: map[string][]string{}, conds: map[string]any{},
 		smtp: map[string]map[string]any{}, members: map[string][]string{},
 		gmembers: map[string][]string{}, pats: map[string]string{},
 		policies: map[string]map[string]any{
@@ -260,13 +261,18 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{})
 	case p == "/v2/actions/executions/search":
 		var items []any
-		for ev, ids := range f.execs {
-			items = append(items, map[string]any{"condition": map[string]any{"event": map[string]any{"event": ev}}, "targets": ids})
+		for k, ids := range f.execs {
+			cond := f.conds[k]
+			if fn, ok := cond.(map[string]any)["function"].(map[string]any); ok {
+				// Zitadel v4.20 returns the function name with its prefix.
+				cond = map[string]any{"function": map[string]any{"name": "function/" + fn["name"].(string)}}
+			}
+			items = append(items, map[string]any{"condition": cond, "targets": ids})
 		}
 		reply(map[string]any{"executions": items})
 	case p == "/v2/actions/executions":
-		ev := in["condition"].(map[string]any)["event"].(map[string]any)["event"].(string)
-		f.execs[ev] = strSlice(in["targets"])
+		k := condKey(in["condition"].(map[string]any))
+		f.execs[k], f.conds[k] = strSlice(in["targets"]), in["condition"]
 		reply(map[string]any{})
 	case p == "/admin/v1/policies/password/complexity", p == "/admin/v1/policies/password/lockout":
 		if r.Method == http.MethodPut {
@@ -387,8 +393,18 @@ func userName(in map[string]any) string {
 	return ""
 }
 
+// condKey names a condition: event:<event>, request:<method> or function:<name>.
+func condKey(c map[string]any) string {
+	for kind, field := range map[string]string{"event": "event", "request": "method", "function": "name"} {
+		if m, ok := c[kind].(map[string]any); ok {
+			return kind + ":" + m[field].(string)
+		}
+	}
+	return ""
+}
+
 func strSlice(v any) []string {
-	var out []string
+	out := []string{}
 	for _, s := range v.([]any) {
 		out = append(out, s.(string))
 	}
@@ -597,7 +613,7 @@ func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
 		t.Errorf("second run made %d PATs, want 1 in total", f.patN)
 	}
 	for _, ev := range []string{"user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"} {
-		if len(f.execs[ev]) != 1 {
+		if len(f.execs["event:"+ev]) != 1 {
 			t.Errorf("no execution for %s", ev)
 		}
 	}
@@ -719,7 +735,7 @@ func TestIdentityHookIsSetUpOnce(t *testing.T) {
 	for k := range f.targets {
 		id = k
 	}
-	if got := f.execs["user.human.added"]; len(got) != 1 || got[0] != id {
+	if got := f.execs["event:user.human.added"]; len(got) != 1 || got[0] != id {
 		t.Errorf("execution user.human.added -> %v, want [%s]", got, id)
 	}
 	key, err := os.ReadFile(cfg.IdentityHookKeyFile)
@@ -817,5 +833,137 @@ func TestDuplicateSMTPProviderIsDropped(t *testing.T) {
 	run(t, c, cfg)
 	if len(f.smtp) != 1 {
 		t.Fatalf("providers %d, want 1", len(f.smtp))
+	}
+}
+
+func gateSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
+	t.Helper()
+	dir := t.TempDir()
+	f, c, cfg := setup(t, map[string]string{
+		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL":      "http://identity-hooks:8081/internal/zitadel/actions",
+		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE": filepath.Join(dir, "identity-signing.key"),
+		"SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE":      filepath.Join(dir, "identity.pat"),
+		"SYNTHWERK_ZITADEL_MFA_GATE":               "true",
+		"SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE":      filepath.Join(dir, "identity-mfa-gate.key"),
+		"SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE":  filepath.Join(dir, "identity-token-claims.key"),
+	})
+	cfg.IdentityHookKeyOwner = os.Getuid()
+	return f, c, cfg
+}
+
+func targetByName(f *fake, name string) (string, map[string]any) {
+	for id, tg := range f.targets {
+		if tg["name"] == name {
+			return id, tg
+		}
+	}
+	return "", nil
+}
+
+func TestMFAGateIsSetUpOnce(t *testing.T) {
+	f, c, cfg := gateSetup(t)
+	run(t, c, cfg)
+	gateID, gate := targetByName(f, bootstrap.MFAGateTarget)
+	claimsID, claims := targetByName(f, bootstrap.TokenClaimsTarget)
+	if gate == nil || claims == nil || len(f.targets) != 3 {
+		t.Fatalf("targets %v", f.targets)
+	}
+	// The gate must answer for every sign-in; the claims target may fail (no amr then).
+	if fmt.Sprint(gate["restCall"]) != "map[interruptOnError:true]" || gate["endpoint"] != "http://identity-hooks:8081/internal/zitadel/mfa-gate" {
+		t.Errorf("gate target %v", gate)
+	}
+	if fmt.Sprint(claims["restCall"]) != "map[interruptOnError:false]" || claims["endpoint"] != "http://identity-hooks:8081/internal/zitadel/token-claims" {
+		t.Errorf("claims target %v", claims)
+	}
+	for _, m := range bootstrap.GatedMethods {
+		if got := f.execs["request:"+m]; !slices.Equal(got, []string{gateID}) {
+			t.Errorf("execution %s -> %v, want [%s]", m, got, gateID)
+		}
+	}
+	if got := f.execs["function:preaccesstoken"]; !slices.Equal(got, []string{claimsID}) {
+		t.Errorf("execution preaccesstoken -> %v, want [%s]", got, claimsID)
+	}
+	for file, id := range map[string]string{cfg.MFAGateKeyFile: gateID, cfg.TokenClaimsKeyFile: claimsID} {
+		key, err := os.ReadFile(file) //nolint:gosec // G304: a temp file of this test
+		if err != nil || string(key) != "key-"+id {
+			t.Fatalf("key file %s: %q, %v", file, key, err)
+		}
+		if st, _ := os.Stat(file); st.Mode().Perm() != 0o400 {
+			t.Errorf("key file %s mode %v, want 0400", file, st.Mode().Perm())
+		}
+	}
+	f.calls = nil
+	run(t, c, cfg)
+	for _, call := range f.calls {
+		if call == "POST /v2/actions/targets" || call == "PUT /v2/actions/executions" ||
+			strings.HasPrefix(call, "POST /v2/actions/targets/"+gateID) || strings.HasPrefix(call, "POST /v2/actions/targets/"+claimsID) {
+			t.Errorf("second run changed the gate: %s", call)
+		}
+	}
+}
+
+func TestMFAGateOffClearsTheExecutions(t *testing.T) {
+	f, c, cfg := gateSetup(t)
+	run(t, c, cfg)
+	cfg.MFAGate = false
+	run(t, c, cfg)
+	for _, m := range bootstrap.GatedMethods {
+		if got := f.execs["request:"+m]; len(got) != 0 {
+			t.Errorf("execution %s -> %v after the gate was turned off", m, got)
+		}
+	}
+	if got := f.execs["function:preaccesstoken"]; len(got) != 0 {
+		t.Errorf("execution preaccesstoken -> %v after the gate was turned off", got)
+	}
+	if got := f.execs["event:user.human.added"]; len(got) != 1 {
+		t.Errorf("the user hook was touched: %v", got)
+	}
+	f.calls = nil
+	run(t, c, cfg)
+	for _, call := range f.calls {
+		if call == "PUT /v2/actions/executions" {
+			t.Errorf("third run changed an execution: %s", call)
+		}
+	}
+}
+
+func TestMFAGateConfig(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"SYNTHWERK_ZITADEL_MFA_GATE": "true"},
+		{"SYNTHWERK_ZITADEL_MFA_GATE": "yes", "SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL": "http://identity-hooks:8081/x"},
+	} {
+		if _, err := bootstrap.ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
+			t.Errorf("%v: no error", env)
+		}
+	}
+}
+
+func TestTOTP(t *testing.T) {
+	// RFC 6238 appendix B, SHA-1 secret "12345678901234567890", last 6 of the 8 digits.
+	secret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" //nolint:gosec // G101: the public RFC 6238 test secret
+	for unix, want := range map[int64]string{59: "287082", 1111111109: "081804", 1234567890: "005924", 20000000000: "353130"} {
+		got, err := bootstrap.TOTP(secret, time.Unix(unix, 0))
+		if err != nil || got != want {
+			t.Errorf("T=%d: %q %v, want %q", unix, got, err, want)
+		}
+	}
+	if _, err := bootstrap.TOTP("not base32!", time.Now()); err == nil {
+		t.Error("bad secret: no error")
+	}
+}
+
+func TestHasMFA(t *testing.T) {
+	for _, c := range []struct {
+		claims map[string]any
+		want   bool
+	}{
+		{map[string]any{"amr": []any{"pwd", "otp", "mfa"}}, true},
+		{map[string]any{"amr": []any{"pwd"}}, false},
+		{map[string]any{"synthwerk:mfa": true}, false},
+		{map[string]any{}, false},
+	} {
+		if got := bootstrap.HasMFA(c.claims); got != c.want {
+			t.Errorf("%v: %v, want %v", c.claims, got, c.want)
+		}
 	}
 }
