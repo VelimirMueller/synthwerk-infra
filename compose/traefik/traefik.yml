@@ -44,7 +44,7 @@ accessLog:
 # Traefik v3.7 writes url.full and url.query with every query value replaced by
 # "REDACTED", except for the names listed in safeQueryParams. The list stays empty
 # so no query value reaches a span. Client IPs in spans are truncated in the
-# collector later (design §8).
+# collector (compose/telemetry/otelcol-client-ip.yaml, design §8).
 tracing:
   serviceName: synthwerk-edge
   safeQueryParams: []
