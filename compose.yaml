@@ -445,8 +445,12 @@ services:
       - "127.0.0.1:${SYNTHWERK_TELEMETRY_UI_PORT:-3000}:3000"
       - "127.0.0.1:${SYNTHWERK_TELEMETRY_OTLP_GRPC_PORT:-4317}:4317"
       - "127.0.0.1:${SYNTHWERK_TELEMETRY_OTLP_HTTP_PORT:-4318}:4318"
+    environment:
+      # The collector also loads the overlay: client IPs in spans are truncated (#3).
+      OTELCOL_EXTRA_ARGS: --config=file:/otel-lgtm/otelcol-client-ip.yaml
     volumes:
       - telemetry-data:/data
+      - ./compose/telemetry/otelcol-client-ip.yaml:/otel-lgtm/otelcol-client-ip.yaml:ro
     networks: [edge, app]
     healthcheck:
       <<: *healthcheck

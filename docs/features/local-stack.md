@@ -8,7 +8,7 @@ paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "z
 api: []
 events: []
 mcp: []
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 
 # Local stack
@@ -22,6 +22,7 @@ updated: 2026-10-28
 
 - Starts Traefik v3 (edge), Coraza (WAF), NATS JetStream (bus), PostgreSQL 18 (database) and grafana/otel-lgtm (telemetry).
 - Starts a stub backend at `/stub` so the edge has a target.
+- Loads a collector overlay into telemetry (`OTELCOL_EXTRA_ARGS`, `compose/telemetry/otelcol-client-ip.yaml`). It truncates client IPs in every span before export: IPv4 to /24, other values dropped.
 - Starts synthwerk-pulse. It checks the parts in `compose/pulse/targets.yaml` every 5 s.
 - Runs pulse from its GHCR image, pinned by digest (`ghcr.io/velimirmueller/synthwerk-pulse`).
 - Routes `/pulse` through the chain `edge-secure-stream`. It has no `buffering` middleware, because buffering holds an SSE response back.
@@ -95,6 +96,7 @@ updated: 2026-10-28
 - `tests/stack/stack_test.sh` — `edge - identity, llm, Zitadel (ready, OIDC discovery, login UI, gRPC-web) - 200; SQL injection on the auth host - 403`
 - `tests/stack/stack_test.sh` — `database - role llm - no access to schema identity or database zitadel`
 - `tests/stack/stack_test.sh` — `CORS preflight - allowed origin - allow-origin set; foreign origin - not set`
+- `tests/stack/stack_test.sh` — `spans in Tempo - OTLP probe with 203.0.113.57 - stored as 203.0.113.0, IPv6 dropped; edge request - no full client IP in its trace`
 - `tests/waf/waf_test.go` — `gRPC, gRPC-web, Connect proto on the gRPC host - 200; gRPC on another or a lookalike host - 403; unknown content type - 403; SQL injection in a gRPC-web query - 403; two Content-Type headers - 400`
 - `tests/stack/stack_test.sh` — `llm - no or forged token - 401, no message stored; signed-in send - 5 deltas spread over >= 900 ms through edge and WAF, then done; other user - 404; SQL and HTML in content - 200, in the query - 403; facts on EVT_LLM without text; logs without text`
 - `tests/waf/waf_test.go` — `chat prompt - SQL, HTML, shell in content - 200; same text in another field, the query, a header, another route or GET - 403`
@@ -111,4 +113,5 @@ updated: 2026-10-28
 | 2026-10-23 | The one-shot `zitadel-bootstrap` joins the stack; the admin PAT moves to the volume `zitadel-admin` (synthwerk#28 task 2). |
 | 2026-10-23 | Network `zitadel-hooks` (Zitadel to identity Actions) and the volume `zitadel-hooks` for the signing key (synthwerk#28 task 5). |
 | 2026-10-28 | llm streams chat answers: provider and token issuer from the env, WAF rule for prompts, `ollama-pull`, stack test with a local issuer (synthwerk#32). |
+| 2026-10-29 | Telemetry: collector overlay truncates client IPs in spans (#3). |
 | 2026-10-28 | Org roles: identity token check, Zitadel grant writes as `identity-sync`, relay to `EVT_IDENTITY`, PATCH on the member route through CORS and WAF (synthwerk#29). |

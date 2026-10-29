@@ -365,6 +365,53 @@ if docker compose logs --no-color edge 2>&1 | grep -q secret123; then fail "secr
 if grep -qE '"Client(Addr|Host)"' <<<"$logs"; then fail "the access log has the client IP"; else pass "no client IP in the access log"; fi
 if grep -q '"RouterName":"stub@file"' <<<"$logs"; then pass "access log is written"; else fail "no access log line for the stub router"; fi
 
+echo "# no full client IP in stored spans (#3)"
+# tempo <curl args...>: GET on the Tempo API inside the telemetry container.
+tempo() { docker compose exec -T telemetry curl -s --max-time 5 "$@" 2>/dev/null || true; }
+# span_ips <trace JSON>: every client or peer address value in the trace, one per line.
+span_ips() {
+  { grep -oE '"key": ?"(client\.address|network\.peer\.address|http\.client_ip|net\.sock\.peer\.addr|net\.peer\.ip)", ?"value": ?\{"stringValue": ?"[^"]*"' <<<"$1" || true; } \
+    | sed -E 's/.*"stringValue": ?"([^"]*)"$/\1/'
+}
+# full_ips <values>: the values that are not an IPv4 /24 (a.b.c.0). Prints a count only.
+full_ips() { { grep -cvE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0$' <<<"$1" || true; } | head -n 1; }
+# A span with a known address (documentation range, RFC 5737/3849) through OTLP HTTP.
+probe_trace=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+probe_span=$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')
+now_ns="$(date +%s)000000000"
+probe_body='{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"stack-test-probe"}}]},"scopeSpans":[{"spans":[{"traceId":"'$probe_trace'","spanId":"'$probe_span'","name":"probe","kind":2,"startTimeUnixNano":"'$now_ns'","endTimeUnixNano":"'$now_ns'","attributes":[{"key":"client.address","value":{"stringValue":"203.0.113.57"}},{"key":"network.peer.address","value":{"stringValue":"2001:db8::57"}}]}]}]}]}'
+expect_status "OTLP span with a client IP is accepted" 200 -H 'Content-Type: application/json' \
+  --data "$probe_body" "http://127.0.0.1:${SYNTHWERK_TELEMETRY_OTLP_HTTP_PORT:-4318}/v1/traces"
+probe=""
+for _ in $(seq 1 30); do
+  probe=$(tempo "http://127.0.0.1:3200/api/traces/$probe_trace")
+  [[ "$probe" == *stack-test-probe* ]] && break
+  sleep 2
+done
+ips=$(span_ips "$probe")
+if [[ "$probe" != *'"name":"probe"'* ]]; then
+  fail "probe span (trace $probe_trace) not in Tempo within 60 s"
+elif [[ "$ips" == "203.0.113.0" && "$probe" != *203.0.113.57* && "$probe" != *2001:db8::57* ]]; then pass "stored probe span: IPv4 truncated to /24, IPv6 dropped"; else fail "stored probe span addresses: '${ips//$'\n'/ }', want only 203.0.113.0"; fi
+# A real request through the edge: no span of its trace holds a full client IP.
+# $canary is "canary" plus digits: safe in the path and in the TraceQL string.
+ip_path="/stub/ip-check-$canary"
+expect_status "request for the edge span check" 200 "$EDGE$ip_path"
+edge_trace=""
+for _ in $(seq 1 30); do
+  edge_trace=$(tempo -G --data-urlencode "q={ resource.service.name = \"synthwerk-edge\" && span.url.path = \"$ip_path\" }" \
+    --data-urlencode limit=1 http://127.0.0.1:3200/api/search | { grep -oE '"traceID": ?"[0-9a-f]+"' || true; } | head -n 1 | cut -d'"' -f4)
+  [[ -n "$edge_trace" ]] && break
+  sleep 2
+done
+if [[ -n "$edge_trace" ]]; then
+  ips=$(span_ips "$(tempo "http://127.0.0.1:3200/api/traces/$edge_trace")")
+  n=$(full_ips "$ips")
+  # Values are not printed: a full one would be the IP of the test runner.
+  if [[ -n "$ips" && "$n" == 0 ]]; then pass "edge trace in Tempo: $(wc -l <<<"$ips" | tr -d ' ') client address(es), all truncated to /24"; else fail "edge trace in Tempo: ${n:-?} full client address(es) of $(grep -c . <<<"$ips" || true)"; fi
+else
+  fail "no edge trace for $ip_path in Tempo within 60 s"
+fi
+
 echo "# pulse streams the status of each service (synthwerk#26)"
 # wait_for <ERE pattern> <seconds>: true when the stream log holds the pattern in time.
 wait_for() {

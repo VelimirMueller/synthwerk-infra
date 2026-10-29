@@ -1,0 +1,32 @@
+# Overlay for the OTel Collector in grafana/otel-lgtm (OTELCOL_EXTRA_ARGS in compose.yaml).
+# The collector merges it over /otel-lgtm/otelcol-config.yaml: maps merge, lists replace.
+#
+# No full client IP in a stored span (design §8, synthwerk-infra#3):
+# - An IPv4 address keeps its /24: 203.0.113.57 becomes 203.0.113.0.
+# - Any other value (IPv6, IPv4-mapped IPv6, host name, bad octets) is dropped.
+# Applies to every span, not only the edge: otelhttp in the Go services sets
+# client.address from X-Forwarded-For.
+processors:
+  transform/client-ip:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # client.address and network.peer.address (semconv 1.2x), plus the old names.
+          - replace_pattern(attributes["client.address"], "^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}$", "$${1}.0")
+          - replace_pattern(attributes["network.peer.address"], "^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}$", "$${1}.0")
+          - replace_pattern(attributes["http.client_ip"], "^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}$", "$${1}.0")
+          - replace_pattern(attributes["net.sock.peer.addr"], "^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}$", "$${1}.0")
+          - replace_pattern(attributes["net.peer.ip"], "^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}$", "$${1}.0")
+          - delete_key(attributes, "client.address") where attributes["client.address"] != nil and not IsMatch(attributes["client.address"], "^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.0$")
+          - delete_key(attributes, "network.peer.address") where attributes["network.peer.address"] != nil and not IsMatch(attributes["network.peer.address"], "^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.0$")
+          - delete_key(attributes, "http.client_ip") where attributes["http.client_ip"] != nil and not IsMatch(attributes["http.client_ip"], "^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.0$")
+          - delete_key(attributes, "net.sock.peer.addr") where attributes["net.sock.peer.addr"] != nil and not IsMatch(attributes["net.sock.peer.addr"], "^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.0$")
+          - delete_key(attributes, "net.peer.ip") where attributes["net.peer.ip"] != nil and not IsMatch(attributes["net.peer.ip"], "^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.0$")
+
+service:
+  pipelines:
+    traces:
+      # Replaces the base list. Base in otel-lgtm 0.36.0: [batch] only; check it on an image bump.
+      # Truncate before the batch, so no full IP waits in memory for export.
+      processors: [transform/client-ip, batch]
