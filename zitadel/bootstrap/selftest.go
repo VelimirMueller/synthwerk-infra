@@ -2,9 +2,13 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1" //nolint:gosec // G505: RFC 6238 TOTP uses HMAC-SHA1, as authenticator apps do
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // StudioScope is the scope the studio asks for (spike run1, variant A): the
@@ -24,11 +29,21 @@ func StudioScope(projectID string) string {
 // RolesClaim is the Zitadel claim that maps role -> {org id: org domain}.
 const RolesClaim = "urn:zitadel:iam:org:project:roles"
 
+// PasswordChecks are the session checks of a password-only sign-in.
+func PasswordChecks(loginName, password string) map[string]any {
+	return map[string]any{"user": map[string]any{"loginName": loginName}, "password": map[string]any{"password": password}}
+}
+
+// ErrMFARefused: the MFA gate refused to finish the sign-in (synthwerk#94). No
+// code and no token exist.
+var ErrMFARefused = errors.New("the MFA gate refused the sign-in")
+
 // Mint signs a user in without a browser, as the login app does: authorize
-// (PKCE), a session with the password check (login client PAT), finalize the
-// auth request, then exchange the code with the studio client secret.
-// It returns the access token claims. Use it for local and ci checks only.
-func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redirectURI, loginName, password string) (map[string]any, error) {
+// (PKCE), a session with checks (login client PAT), finalize the auth request,
+// then exchange the code with the studio client secret.
+// It returns the access token claims. A refusal of the MFA gate wraps
+// ErrMFARefused. Use it for local and ci checks only.
+func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redirectURI string, checks map[string]any) (map[string]any, error) {
 	verifier := rand.Text() + rand.Text()
 	sum := sha256.Sum256([]byte(verifier))
 	q := url.Values{
@@ -54,9 +69,7 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 		SessionID    string `json:"sessionId"`
 		SessionToken string `json:"sessionToken"`
 	}
-	if err := login.Do(ctx, http.MethodPost, "/v2/sessions", "", map[string]any{
-		"checks": map[string]any{"user": map[string]any{"loginName": loginName}, "password": map[string]any{"password": password}},
-	}, &sess); err != nil {
+	if err := login.Do(ctx, http.MethodPost, "/v2/sessions", "", map[string]any{"checks": checks}, &sess); err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
 	var cb struct {
@@ -65,6 +78,10 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 	if err := login.Do(ctx, http.MethodPost, "/v2/oidc/auth_requests/"+authRequest, "", map[string]any{
 		"session": map[string]any{"sessionId": sess.SessionID, "sessionToken": sess.SessionToken},
 	}, &cb); err != nil {
+		var e *APIError
+		if errors.As(err, &e) && e.Status == http.StatusForbidden && strings.Contains(e.Message, "mfa_required") {
+			return nil, fmt.Errorf("finalize auth request: %w: %w", ErrMFARefused, err)
+		}
 		return nil, fmt.Errorf("finalize auth request: %w", err)
 	}
 	cbURL, err := url.Parse(cb.CallbackURL)
@@ -163,4 +180,62 @@ func (c *Client) redirect(ctx context.Context, path string) (*url.URL, error) {
 		return nil, fmt.Errorf("GET %s: redirect without Location", strings.SplitN(path, "?", 2)[0])
 	}
 	return url.Parse(loc)
+}
+
+// HasMFA reports whether the access token claims carry amr with "mfa", the rule of
+// kit/auth RequireMFA in synthwerk-contracts.
+func HasMFA(claims map[string]any) bool {
+	amr, _ := claims["amr"].([]any)
+	for _, v := range amr {
+		if v == "mfa" {
+			return true
+		}
+	}
+	return false
+}
+
+// EnrolTOTP gives the user a new TOTP factor and returns its secret. An older TOTP
+// factor of the user is removed first, so each selftest run starts clean.
+// Test users only (local and ci).
+func EnrolTOTP(ctx context.Context, c *Client, userID string) (string, error) {
+	if err := c.Do(ctx, http.MethodDelete, "/v2/users/"+userID+"/totp", "", nil, nil); err != nil && !IsNotFound(err) {
+		var e *APIError
+		// Zitadel answers 400 or 412 when the user has no TOTP: nothing to remove.
+		if !errors.As(err, &e) || (e.Status != http.StatusBadRequest && e.Status != http.StatusPreconditionFailed) {
+			return "", fmt.Errorf("remove totp: %w", err)
+		}
+	}
+	var reg struct {
+		Secret string `json:"secret"`
+	}
+	if err := c.Do(ctx, http.MethodPost, "/v2/users/"+userID+"/totp", "", map[string]any{}, &reg); err != nil {
+		return "", fmt.Errorf("register totp: %w", err)
+	}
+	if reg.Secret == "" {
+		return "", errors.New("register totp: Zitadel returned no secret")
+	}
+	code, err := TOTP(reg.Secret, time.Now())
+	if err != nil {
+		return "", err
+	}
+	if err := c.Do(ctx, http.MethodPost, "/v2/users/"+userID+"/totp/verify", "", map[string]any{"code": code}, nil); err != nil {
+		return "", fmt.Errorf("verify totp: %w", err)
+	}
+	return reg.Secret, nil
+}
+
+// TOTP is the RFC 6238 code (HMAC-SHA1, 6 digits, 30 s) for secret (base32) at t.
+func TOTP(secret string, t time.Time) (string, error) {
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimRight(secret, "=")))
+	if err != nil {
+		return "", fmt.Errorf("totp secret: %w", err)
+	}
+	var counter [8]byte
+	binary.BigEndian.PutUint64(counter[:], uint64(t.Unix()/30)) //nolint:gosec // G115: Unix time is positive
+	mac := hmac.New(sha1.New, key)
+	mac.Write(counter[:])
+	sum := mac.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	bin := binary.BigEndian.Uint32(sum[off:off+4]) & 0x7fffffff
+	return fmt.Sprintf("%06d", bin%1_000_000), nil
 }

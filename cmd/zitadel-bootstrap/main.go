@@ -116,18 +116,52 @@ func selftest(ctx context.Context, log *slog.Logger) error {
 		if u.Org == bootstrap.DemoOrg {
 			orgID = r.DemoOrgID
 		}
-		claims, err := bootstrap.Mint(ctx, c, loginPAT, sc, cfg.StudioRedirectURIs[0], u.UserName, cfg.TestUserPassword)
+		checks := bootstrap.PasswordChecks(u.UserName, cfg.TestUserPassword)
+		if cfg.MFAGate {
+			if checks, err = mfaChecks(ctx, c, loginPAT, sc, cfg, u.UserName, r.TestUserIDs[u.UserName]); err != nil {
+				return fmt.Errorf("%s: %w", u.UserName, err)
+			}
+		}
+		claims, err := bootstrap.Mint(ctx, c, loginPAT, sc, cfg.StudioRedirectURIs[0], checks)
 		if err != nil {
 			return fmt.Errorf("%s: %w", u.UserName, err)
+		}
+		if cfg.MFAGate && !bootstrap.HasMFA(claims) {
+			return fmt.Errorf("%s: password and TOTP sign-in: access token amr %v has no mfa", u.UserName, claims["amr"])
 		}
 		for _, role := range u.Roles {
 			if err := bootstrap.CheckRoles(claims, orgID, role); err != nil {
 				return fmt.Errorf("%s: %w", u.UserName, err)
 			}
 		}
-		log.Info("selftest ok", "user", u.UserName, "org_id", orgID, "roles", u.Roles, "amr", claims["amr"])
+		log.Info("selftest ok", "user", u.UserName, "org_id", orgID, "roles", u.Roles, "amr", claims["amr"], "mfa_gate", cfg.MFAGate)
 	}
 	return nil
+}
+
+// mfaChecks proves the MFA gate for one test user (synthwerk#94): a password-only
+// sign-in must get no token. It then enrols TOTP and returns password and TOTP
+// checks. The TOTP code is the one of the next 30 s step (Zitadel accepts one step
+// of skew); the enrolment used the current step, so the codes are for different steps.
+func mfaChecks(ctx context.Context, c *bootstrap.Client, loginPAT string, sc bootstrap.StudioClient, cfg bootstrap.Config, user, userID string) (map[string]any, error) {
+	_, err := bootstrap.Mint(ctx, c, loginPAT, sc, cfg.StudioRedirectURIs[0], bootstrap.PasswordChecks(user, cfg.TestUserPassword))
+	if err == nil {
+		return nil, errors.New("password-only sign-in got a token: the MFA gate is not active")
+	}
+	if !errors.Is(err, bootstrap.ErrMFARefused) {
+		return nil, fmt.Errorf("password-only sign-in: %w", err)
+	}
+	secret, err := bootstrap.EnrolTOTP(ctx, c, userID)
+	if err != nil {
+		return nil, err
+	}
+	code, err := bootstrap.TOTP(secret, time.Now().Add(30*time.Second))
+	if err != nil {
+		return nil, err
+	}
+	checks := bootstrap.PasswordChecks(user, cfg.TestUserPassword)
+	checks["totp"] = map[string]any{"code": code}
+	return checks, nil
 }
 
 func readSecret(path string) (string, error) {

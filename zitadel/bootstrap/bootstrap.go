@@ -56,6 +56,15 @@ type Config struct {
 	IdentityPATFile string
 	// IdentityPATLifetime is the lifetime of a new identity-sync PAT. Default 30 days.
 	IdentityPATLifetime time.Duration
+	// MFAGate turns on the server-side MFA gate (synthwerk#94, ADR-0002 option C):
+	// request executions on the sign-in calls (GatedMethods) and the pre-access-token
+	// function call identity. Needs IdentityHookURL and an identity image with the
+	// gate routes. Off = the bootstrap points those executions at no target.
+	MFAGate bool
+	// MFAGateKeyFile and TokenClaimsKeyFile receive the signing keys of the two
+	// targets (mode 0400, owner IdentityHookKeyOwner) in the volume zitadel-hooks.
+	MFAGateKeyFile     string
+	TokenClaimsKeyFile string
 	// SMTPHost is the mail server as host:port (Mailpit in local and ci, D-49).
 	// Empty = Zitadel's email provider is not touched (dev and prd set it up apart).
 	SMTPHost string
@@ -91,8 +100,17 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		IdentityHookKeyOwner: 65532,
 		IdentityPATFile:      or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE"), "/zitadel/hooks/identity.pat"),
 		IdentityPATLifetime:  30 * 24 * time.Hour,
+		MFAGateKeyFile:       or(getenv("SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE"), "/zitadel/hooks/identity-mfa-gate.key"),
+		TokenClaimsKeyFile:   or(getenv("SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE"), "/zitadel/hooks/identity-token-claims.key"),
 		SMTPHost:             getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
 		SMTPSender:           or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
+	}
+	switch v := getenv("SYNTHWERK_ZITADEL_MFA_GATE"); v {
+	case "", "false":
+	case "true":
+		cfg.MFAGate = true
+	default:
+		return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_MFA_GATE %q: want true or false", v)
 	}
 	if v := getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -111,6 +129,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
 			return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL %q: want an absolute http(s) URL", u)
 		}
+	}
+	if cfg.MFAGate && cfg.IdentityHookURL == "" {
+		return Config{}, errors.New("SYNTHWERK_ZITADEL_MFA_GATE=true needs SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: identity runs the gate")
 	}
 	for _, u := range append(slices.Clone(cfg.StudioRedirectURIs), cfg.StudioLogoutURIs...) {
 		if strings.Contains(u, "*") || (!strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://")) {
@@ -176,7 +197,10 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 			fn   func() error
 		}{"identity machine user", func() error {
 			return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID, r.ProjectID, r.DemoGrantID)
-		}})
+		}}, struct {
+			name string
+			fn   func() error
+		}{"mfa gate", func() error { return ensureMFAGate(ctx, c, cfg) }})
 	}
 	if cfg.SMTPHost != "" {
 		steps = append(steps, struct {
@@ -795,34 +819,157 @@ func revokeOtherPATs(ctx context.Context, c *Client, orgID, userID, keep string)
 // executions: their target list is replaced, not merged. Zitadel caches executions and
 // targets, so a change can take some seconds to apply.
 func ensureIdentityHook(ctx context.Context, c *Client, cfg Config) error {
+	id, err := ensureTarget(ctx, c, cfg, target{
+		Name:     IdentityHookTarget,
+		Endpoint: cfg.IdentityHookURL,
+		Type:     "restWebhook",
+		KeyFile:  cfg.IdentityHookKeyFile,
+	})
+	if err != nil {
+		return err
+	}
+	conds := make([]Condition, 0, len(HookEvents))
+	for _, ev := range HookEvents {
+		conds = append(conds, EventCondition(ev))
+	}
+	return ensureExecutions(ctx, c, conds, []string{id})
+}
+
+// Names of the MFA gate targets (synthwerk#94).
+const (
+	MFAGateTarget     = "identity-mfa-gate"
+	TokenClaimsTarget = "identity-token-claims"
+)
+
+// GatedMethods are the Zitadel calls that finish a sign-in with a session
+// (synthwerk-identity mfagate.GatedMethods). v2beta CreateCallback is still served
+// in v4.20.0, so it is gated too.
+var GatedMethods = []string{
+	"/zitadel.oidc.v2.OIDCService/CreateCallback",
+	"/zitadel.oidc.v2beta.OIDCService/CreateCallback",
+	"/zitadel.oidc.v2.OIDCService/AuthorizeOrDenyDeviceAuthorization",
+	"/zitadel.saml.v2.SAMLService/CreateResponse",
+}
+
+// PreAccessTokenFunction is the function the token claims target runs on.
+const PreAccessTokenFunction = "preaccesstoken"
+
+// identityURL returns the hook URL with path p: the gate routes share the hook
+// listener of identity.
+func identityURL(hook, p string) (string, error) {
+	u, err := url.Parse(hook)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("identity hook URL %q: not an absolute URL", hook)
+	}
+	u.Path, u.RawQuery = p, ""
+	return u.String(), nil
+}
+
+// ensureMFAGate sets up the server-side MFA gate (ADR-0002 option C): a call
+// target that must answer for every sign-in (interruptOnError: no answer = no
+// token) and a call target that adds amr to access tokens (no interrupt: no answer
+// = a token without amr). When cfg.MFAGate is off it points the executions at no
+// target, so an identity without the gate routes cannot block sign-ins.
+func ensureMFAGate(ctx context.Context, c *Client, cfg Config) error {
+	conds := make([]Condition, 0, len(GatedMethods))
+	for _, m := range GatedMethods {
+		conds = append(conds, MethodCondition(m))
+	}
+	claims := []Condition{FunctionCondition(PreAccessTokenFunction)}
+	if !cfg.MFAGate {
+		if err := clearExecutions(ctx, c, conds); err != nil {
+			return err
+		}
+		return clearExecutions(ctx, c, claims)
+	}
+	claimsURL, err := identityURL(cfg.IdentityHookURL, "/internal/zitadel/token-claims")
+	if err != nil {
+		return err
+	}
+	gateURL, err := identityURL(cfg.IdentityHookURL, "/internal/zitadel/mfa-gate")
+	if err != nil {
+		return err
+	}
+	// Claims first: a sign-in that passes the gate finds the claims target in place.
+	claimsID, err := ensureTarget(ctx, c, cfg, target{
+		Name:     TokenClaimsTarget,
+		Endpoint: claimsURL,
+		Type:     "restCall",
+		KeyFile:  cfg.TokenClaimsKeyFile,
+	})
+	if err != nil {
+		return err
+	}
+	if err := ensureExecutions(ctx, c, claims, []string{claimsID}); err != nil {
+		return err
+	}
+	gateID, err := ensureTarget(ctx, c, cfg, target{
+		Name:      MFAGateTarget,
+		Endpoint:  gateURL,
+		Type:      "restCall",
+		Interrupt: true,
+		KeyFile:   cfg.MFAGateKeyFile,
+	})
+	if err != nil {
+		return err
+	}
+	return ensureExecutions(ctx, c, conds, []string{gateID})
+}
+
+// target is an Action target the bootstrap owns.
+type target struct {
+	Name, Endpoint string
+	// Type is "restWebhook" or "restCall".
+	Type      string
+	Interrupt bool
+	// KeyFile receives the signing key for identity.
+	KeyFile string
+}
+
+const targetTimeout = "10s"
+
+// ensureTarget creates or updates t, writes its signing key and returns its id.
+func ensureTarget(ctx context.Context, c *Client, cfg Config, t target) (string, error) {
 	want := map[string]any{
-		"name":        IdentityHookTarget,
-		"restWebhook": map[string]any{"interruptOnError": false},
-		"endpoint":    cfg.IdentityHookURL,
-		"timeout":     "10s",
+		"name":     t.Name,
+		t.Type:     map[string]any{"interruptOnError": t.Interrupt},
+		"endpoint": t.Endpoint,
+		"timeout":  targetTimeout,
 	}
 	var found struct {
 		Targets []struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			Endpoint   string `json:"endpoint"`
-			Timeout    string `json:"timeout"`
-			SigningKey string `json:"signingKey"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Endpoint    string `json:"endpoint"`
+			Timeout     string `json:"timeout"`
+			SigningKey  string `json:"signingKey"`
+			RestWebhook *struct {
+				InterruptOnError bool `json:"interruptOnError"`
+			} `json:"restWebhook"`
+			RestCall *struct {
+				InterruptOnError bool `json:"interruptOnError"`
+			} `json:"restCall"`
 		} `json:"targets"`
 	}
-	search := map[string]any{"filters": []any{map[string]any{"targetNameFilter": map[string]any{"targetName": IdentityHookTarget, "method": "TEXT_FILTER_METHOD_EQUALS"}}}}
+	search := map[string]any{"filters": []any{map[string]any{"targetNameFilter": map[string]any{"targetName": t.Name, "method": "TEXT_FILTER_METHOD_EQUALS"}}}}
 	if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets/search", "", search, &found); err != nil {
-		return err
+		return "", err
 	}
 	var id, key string
-	for _, t := range found.Targets {
-		if t.Name != IdentityHookTarget {
+	for _, f := range found.Targets {
+		if f.Name != t.Name {
 			continue
 		}
-		id, key = t.ID, t.SigningKey
-		if t.Endpoint != cfg.IdentityHookURL || t.Timeout != "10s" {
+		id, key = f.ID, f.SigningKey
+		sameType := (t.Type == "restWebhook" && f.RestWebhook != nil && f.RestWebhook.InterruptOnError == t.Interrupt) ||
+			(t.Type == "restCall" && f.RestCall != nil && f.RestCall.InterruptOnError == t.Interrupt)
+		// Older targets were made before the type was read back: an empty type counts as same.
+		if f.RestWebhook == nil && f.RestCall == nil {
+			sameType = true
+		}
+		if f.Endpoint != t.Endpoint || f.Timeout != targetTimeout || !sameType {
 			if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets/"+id, "", want, nil); err != nil && !IsNotChanged(err) {
-				return err
+				return "", err
 			}
 		}
 	}
@@ -832,44 +979,115 @@ func ensureIdentityHook(ctx context.Context, c *Client, cfg Config) error {
 			SigningKey string `json:"signingKey"`
 		}
 		if err := c.Do(ctx, http.MethodPost, "/v2/actions/targets", "", want, &made); err != nil {
-			return err
+			return "", err
 		}
 		id, key = made.ID, made.SigningKey
 	}
 	if key == "" {
-		return fmt.Errorf("target %s: Zitadel returned no signing key", IdentityHookTarget)
+		return "", fmt.Errorf("target %s: Zitadel returned no signing key", t.Name)
 	}
-	if err := writeKey(cfg.IdentityHookKeyFile, key, cfg.IdentityHookKeyOwner); err != nil {
-		return err
+	if err := writeKey(t.KeyFile, key, cfg.IdentityHookKeyOwner); err != nil {
+		return "", err
 	}
-	return ensureExecutions(ctx, c, id)
+	return id, nil
 }
 
-func ensureExecutions(ctx context.Context, c *Client, targetID string) error {
+// Condition is an execution condition in the v2 API JSON form.
+type Condition map[string]any
+
+// EventCondition matches a Zitadel event.
+func EventCondition(ev string) Condition { return Condition{"event": map[string]any{"event": ev}} }
+
+// MethodCondition matches a request to one API method.
+func MethodCondition(m string) Condition { return Condition{"request": map[string]any{"method": m}} }
+
+// FunctionCondition matches a function such as preaccesstoken.
+func FunctionCondition(name string) Condition {
+	return Condition{"function": map[string]any{"name": name}}
+}
+
+// conditionKey names a condition the same way for what the bootstrap sends and
+// what Zitadel returns. Zitadel may return a function name with "function/".
+func conditionKey(raw json.RawMessage) string {
+	var c struct {
+		Event *struct {
+			Event string `json:"event"`
+		} `json:"event"`
+		Request *struct {
+			Method string `json:"method"`
+		} `json:"request"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(raw, &c) != nil {
+		return ""
+	}
+	switch {
+	case c.Event != nil && c.Event.Event != "":
+		return "event:" + c.Event.Event
+	case c.Request != nil && c.Request.Method != "":
+		return "request:" + c.Request.Method
+	case c.Function != nil && c.Function.Name != "":
+		return "function:" + strings.TrimPrefix(c.Function.Name, "function/")
+	}
+	return ""
+}
+
+func (c Condition) key() string {
+	raw, _ := json.Marshal(c)
+	return conditionKey(raw)
+}
+
+// executions returns the target ids per condition key.
+func executions(ctx context.Context, c *Client) (map[string][]string, error) {
 	var found struct {
 		Executions []struct {
-			Condition struct {
-				Event struct {
-					Event string `json:"event"`
-				} `json:"event"`
-			} `json:"condition"`
-			Targets []string `json:"targets"`
+			Condition json.RawMessage `json:"condition"`
+			Targets   []string        `json:"targets"`
 		} `json:"executions"`
 	}
 	if err := c.Do(ctx, http.MethodPost, "/v2/actions/executions/search", "", map[string]any{}, &found); err != nil {
-		return err
+		return nil, err
 	}
 	have := map[string][]string{}
 	for _, e := range found.Executions {
-		if e.Condition.Event.Event != "" {
-			have[e.Condition.Event.Event] = e.Targets
+		if k := conditionKey(e.Condition); k != "" {
+			have[k] = e.Targets
 		}
 	}
-	for _, ev := range HookEvents {
-		if slices.Equal(have[ev], []string{targetID}) {
+	return have, nil
+}
+
+// ensureExecutions points each condition at exactly targets.
+func ensureExecutions(ctx context.Context, c *Client, conds []Condition, targets []string) error {
+	have, err := executions(ctx, c)
+	if err != nil {
+		return err
+	}
+	for _, cond := range conds {
+		if slices.Equal(have[cond.key()], targets) {
 			continue
 		}
-		body := map[string]any{"condition": map[string]any{"event": map[string]any{"event": ev}}, "targets": []string{targetID}}
+		body := map[string]any{"condition": cond, "targets": targets}
+		if err := c.Do(ctx, http.MethodPut, "/v2/actions/executions", "", body, nil); err != nil && !IsNotChanged(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// clearExecutions points each condition that has targets at none.
+func clearExecutions(ctx context.Context, c *Client, conds []Condition) error {
+	have, err := executions(ctx, c)
+	if err != nil {
+		return err
+	}
+	for _, cond := range conds {
+		if len(have[cond.key()]) == 0 {
+			continue
+		}
+		body := map[string]any{"condition": cond, "targets": []string{}}
 		if err := c.Do(ctx, http.MethodPut, "/v2/actions/executions", "", body, nil); err != nil && !IsNotChanged(err) {
 			return err
 		}

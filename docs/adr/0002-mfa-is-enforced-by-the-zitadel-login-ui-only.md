@@ -1,6 +1,6 @@
 # ADR-0002: MFA is enforced by the Zitadel login UI only; services fail closed
 
-- Status: accepted
+- Status: superseded by ADR-0004
 - Date: 2026-10-28
 - Decision log: D-47 (amended by this ADR), D-51
 
