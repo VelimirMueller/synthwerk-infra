@@ -410,6 +410,39 @@ if tests/stack/issuer.sh active; then
     if [[ "$wbody" == *"\"iss\":\"$wiss\""* && "$wbody" == *"\"synthwerk:origin\":\"$shop\""* ]]; then pass "widget token: iss $wiss, bound to $shop"; else fail "widget token claims: ${wbody:0:200}"; fi
     jwks=$(curl -s --max-time 10 "$EDGE/identity/.well-known/jwks.json" || true)
     if [[ "$jwks" == *'"kty":"EC"'* && "$jwks" == *'"crv":"P-256"'* ]]; then pass "widget key set on the edge: one P-256 key"; else fail "widget key set: ${jwks:0:120}"; fi
+
+    echo "# llm chat with the widget token (synthwerk#30, #34)"
+    # llm trusts identity's widget issuer next to the user issuer (SYNTHWERK_LLM_WIDGET_*).
+    lready=$(curl -s --max-time 10 "$EDGE/llm/readyz" || true)
+    if [[ "$lready" == *'"name":"jwks_widget","status":"ok"'* ]]; then pass "llm reads the widget key set"; else fail "llm jwks_widget not ok: ${lready:0:240}"; fi
+    if [[ -z "$wtok" ]]; then
+      fail "llm: no widget token to test with (see the widget routes above)"
+    else
+      wauth=(-H "Authorization: Bearer $wtok" -H 'Content-Type: application/json')
+      wconv=$(curl -s --max-time 10 -X POST "${wauth[@]}" -H "Origin: $shop" --data '{}' \
+        "$EDGE/llm/v1/conversations" | grep -o '"id":"[0-9a-f-]*"' | cut -d'"' -f4 || true)
+      if [[ -n "$wconv" ]]; then pass "widget token from $shop creates conversation $wconv"; else fail "widget token: no conversation id"; fi
+      expect_status "widget token from $shop reads its conversation: 200" 200 "${wauth[@]}" -H "Origin: $shop" "$EDGE/llm/v1/conversations/$wconv"
+      wlog=$(mktemp)
+      curl -sN --max-time 30 -X POST "${wauth[@]}" -H "Origin: $shop" --data '{"content":"one two three four"}' \
+        "$EDGE/llm/v1/conversations/$wconv/messages" >"$wlog" || true
+      wdeltas=$(grep -c '^event: delta' "$wlog" || true)
+      if ((wdeltas >= 1)) && grep -q '^event: done' "$wlog"; then pass "widget token from $shop: answer streams ($wdeltas deltas, then done)"; else fail "widget stream: $wdeltas deltas, $(head -c 200 "$wlog")"; fi
+      rm -f "$wlog"
+      wbefore=$(isql "SELECT count(*) FROM llm.message")
+      expect_status "widget token from another origin: create 403" 403 -X POST "${wauth[@]}" -H 'Origin: https://evil.stack.test' \
+        --data '{}' "$EDGE/llm/v1/conversations"
+      expect_status "widget token from another origin: send 403" 403 -X POST "${wauth[@]}" -H 'Origin: https://evil.stack.test' \
+        --data '{"content":"hi"}' "$EDGE/llm/v1/conversations/$wconv/messages"
+      expect_status "widget token without an Origin: send 403" 403 -X POST "${wauth[@]}" \
+        --data '{"content":"hi"}' "$EDGE/llm/v1/conversations/$wconv/messages"
+      wafter=$(isql "SELECT count(*) FROM llm.message")
+      if [[ "$wbefore" == "$wafter" ]]; then pass "refused widget sends store nothing ($wafter messages)"; else fail "messages $wbefore -> $wafter after refused widget sends"; fi
+      expect_status "widget token on the export: 403" 403 "${wauth[@]}" -H "Origin: $shop" "$EDGE/llm/v1/me/export"
+      expect_status "widget token on the AI settings: 403" 403 "${wauth[@]}" -H "Origin: $shop" "$EDGE/llm/v1/ai-settings"
+      expect_status "widget token changes the AI settings: 403" 403 -X PUT "${wauth[@]}" -H "Origin: $shop" \
+        --data '{"version":0}' "$EDGE/llm/v1/ai-settings"
+    fi
   fi
 
   echo "# vision behind the edge (profile vision; synthwerk#36, #44, #76, #77)"
