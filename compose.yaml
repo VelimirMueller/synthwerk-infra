@@ -474,11 +474,11 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm develop 233290c (deploy.yml; AI settings per org, synthwerk#39),
-  # pinned by digest.
+  # Image from synthwerk-llm develop 4d0d2d2 (deploy.yml; widget tokens of identity on the
+  # chat routes, synthwerk#30), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:233290c40bb2bc6e8bd7e202fe157b1a3dc430da@sha256:eb088a4c351d39cba2a63bea462f348b7811b1dd8f8a63698af74e97b599d634
+    image: ghcr.io/velimirmueller/synthwerk-llm:4d0d2d2e87399338a523d11e71f192f7cb31eae4@sha256:03990d65502fe4f6130952318d9fd4931d0e144db805da403f0006fc93384c4a
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -499,6 +499,12 @@ services:
       SYNTHWERK_LLM_OIDC_ISSUER: ${SYNTHWERK_LLM_OIDC_ISSUER:-http://auth.localhost:8080}
       SYNTHWERK_LLM_OIDC_AUDIENCE: ${SYNTHWERK_LLM_OIDC_AUDIENCE:-synthwerk-api}
       SYNTHWERK_LLM_JWKS_URL: ${SYNTHWERK_LLM_JWKS_URL:-}
+      # Widget tokens (synthwerk#30): the second issuer, identity's widget issuer. llm takes
+      # them on the chat routes only (create, read, send), bound to synthwerk:origin; export
+      # and AI settings refuse them. The key set is identity's, reached inside the network.
+      SYNTHWERK_LLM_WIDGET_ISSUER: ${SYNTHWERK_LLM_WIDGET_ISSUER:-${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}}
+      SYNTHWERK_LLM_WIDGET_JWKS_URL: ${SYNTHWERK_LLM_WIDGET_JWKS_URL:-http://identity:8080/.well-known/jwks.json}
+      SYNTHWERK_LLM_WIDGET_AUDIENCE: ${SYNTHWERK_LLM_WIDGET_AUDIENCE:-synthwerk-api}
       # AI settings (synthwerk#39): llm checks membership and plan limit with identity.
       SYNTHWERK_LLM_IDENTITY_URL: http://identity:8080
     networks: [app, data]
