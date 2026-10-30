@@ -43,7 +43,8 @@ updated: 2026-10-30
 1. Run `docker compose up --wait`. The bootstrap runs after Zitadel is healthy.
 2. Read the result: `docker compose logs zitadel-bootstrap`. The last line lists the org, project and client ids.
 3. Check sign-in and claims: `docker compose run --rm --no-deps zitadel-bootstrap selftest`. Its log also says whether the access token has `sid` and `auth_time` (names only). With the MFA gate on, it first proves that a password-only sign-in gets no token, then enrols a new TOTP for each test user and signs in with password and TOTP; the token must have `amr` with `mfa`.
-4. Change a setting in `zitadel/bootstrap/bootstrap.go`, then `docker compose up --build zitadel-bootstrap`.
+4. Check the account delete (synthwerk#41): `docker compose run --rm --no-deps zitadel-bootstrap delete-check`. It makes a throwaway user `delete-check.<random>` in the demo org, enrols TOTP, signs in with the studio step-up (`prompt=login`, `max_age=0`) and calls identity `DELETE /v1/me`: without `X-Synthwerk-Id-Token` it wants 403 `recent_mfa_required`, with the fresh ID token 202. identity must trust Zitadel (issuer `http://<domain>:8080`, audience the project id); the stack test sets that. It logs status codes and the user id, never a token. Local and ci only (needs the test user password). Without a 202 it removes the user itself.
+5. Change a setting in `zitadel/bootstrap/bootstrap.go`, then `docker compose up --build zitadel-bootstrap`.
 
 ## Rules and limits
 
@@ -66,7 +67,7 @@ updated: 2026-10-30
 | `::ffff:0:0/96` | Left out of the deny list: in v4.20.0 it matches every IPv4 address, so no IPv4 target works with it. The IPv4 CIDRs still block mapped literals such as `[::ffff:127.0.0.1]` (measured 2026-10-23). |
 | Action caching | Zitadel caches executions and targets: a changed execution or endpoint takes some seconds to apply. Users made in the first seconds after the bootstrap can miss the hook (seen in CI-like runs: 1 of 2 test users). Invites come later, so dev and prd are not affected. |
 | Order | The bootstrap waits for identity: Zitadel resolves the target name when it saves the target. |
-| `sid` and `auth_time` | Zitadel v4.20.0 access tokens carry neither (selftest, 2026-10-30, gate on and off). The pre-access-token function sees no session. So identity's account delete (synthwerk#41), which binds the recent MFA to `sid` or `auth_time`, refuses every Zitadel token with 403 `recent_mfa_required`. No instance setting changes this; the fix belongs in synthwerk-identity. |
+| `sid` and `auth_time` | Zitadel v4.20.0 access tokens carry neither (selftest, 2026-10-30, gate on and off). The pre-access-token function sees no session. So identity's account delete (synthwerk#41), which binds the recent MFA to `sid` or `auth_time`, refused every Zitadel token with 403 `recent_mfa_required`. identity#23 fixed it: the delete reads the studio's fresh ID token (`X-Synthwerk-Id-Token`), which has `sid`, `auth_time` and `amr`; `delete-check` proves it. |
 | New customer orgs | Whoever creates one grants `identity-sync` both `PROJECT_GRANT_OWNER` on the project grant and `ORG_USER_MANAGER` in the org (`GrantIdentitySync`, `GrantIdentitySyncOrg`). |
 | Grant deactivate and reactivate events | Not sent to identity: synthwerk-identity (fe9b50f) ignores `user.grant.deactivated` and `user.grant.reactivated` (204). Its own deactivate and reactivate write the grant and the mirror together. |
 | Scope for org and roles | `openid profile urn:zitadel:iam:org:project:id:<project id>:aud urn:zitadel:iam:org:projects:roles urn:zitadel:iam:user:resourceowner` (`bootstrap.StudioScope`). |
@@ -102,6 +103,7 @@ updated: 2026-10-30
 - `tests/zitadel/bootstrap_test.go` — `studio client - copy for studio, mode 0400, rerun replaces it; widget key - P-256 PKCS #8, mode 0400, second call keeps it`
 - `tests/stack/stack_test.sh` — `identity-sync - ORG_USER_MANAGER in the demo org, no platform-org role; deletes a customer-org user 200, a platform-org user 403`
 - `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - all test users get org and role claims; zitadel-login - cannot read the admin PAT`
+- `tests/stack/stack_test.sh` — `delete-check - no ID token - 403 recent_mfa_required; fresh step-up ID token - 202; Zitadel user removed by identity`
 
 ## Changes
 
@@ -115,3 +117,4 @@ updated: 2026-10-30
 | 2026-10-30 | `identity-sync` gets `ORG_USER_MANAGER` in customer orgs (ADR-0005); studio client copy for the studio container; `widget-key` subcommand; selftest logs `sid` and `auth_time` presence (synthwerk#30, #37, #41). |
 | 2026-10-30 | MFA gate on by default: the pinned identity image (`develop` `d4fb74a`) has the gate routes (synthwerk#94). |
 | 2026-10-30 | Project id file for identity; grant deactivate and reactivate events go to the identity hook (synthwerk#37). |
+| 2026-10-30 | Subcommand `delete-check`: account delete with real Zitadel tokens and the ID token step-up (synthwerk#41). |

@@ -538,6 +538,13 @@ func ensureTestUsers(ctx context.Context, c *Client, password string, r *Result)
 	return nil
 }
 
+// EnsureHuman makes the human user userName in orgID with password, or sets the
+// password of the user that has the name already. It returns the user id.
+// Local and ci checks only (delete-check).
+func EnsureHuman(ctx context.Context, c *Client, orgID, userName, password string) (string, error) {
+	return ensureHuman(ctx, c, orgID, userName, password)
+}
+
 func ensureHuman(ctx context.Context, c *Client, orgID, userName, password string) (string, error) {
 	var found struct {
 		Result []struct {
