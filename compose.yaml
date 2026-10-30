@@ -179,6 +179,7 @@ services:
       - >-
         set -eu;
         for f in /streams/*.json; do
+        [ -e "$$f" ] || continue;
         name=$$(basename "$$f" .json);
         if nats stream info "$$name" >/dev/null 2>&1;
         then nats stream edit "$$name" --config "$$f" --force >/dev/null; echo "bus-init: stream $$name updated";

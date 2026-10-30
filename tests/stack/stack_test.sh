@@ -768,7 +768,7 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
   bus_jsz=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
   if grep -qE '"name": ?"EVT_STUDIO"' <<<"$bus_jsz"; then pass "bus-init created the stream EVT_STUDIO"; else fail "no stream EVT_STUDIO on the bus"; fi
   page_id=$(grep '"builder-check: page published' <<<"$out" | grep -oE '"page_id":"[0-9a-f-]{36}"' | cut -d'"' -f4 | head -n 1 || true)
-  if [[ -n "$page_id" ]]; then
+  if [[ "$page_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
     pass "builder-check created, published twice and rolled back page $page_id"
     # sdb / idb <sql>: one value from the studio / the synthwerk database, as the superuser.
     sdb() { docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d studio -tAc "$1" 2>/dev/null | tr -d '\r' || true; }
@@ -818,6 +818,10 @@ echo "# NATS least privilege: studio and identity users (synthwerk#106)"
 nats_as() {
   local user=$1 pw
   pw=$(setting "$2" "")
+  if [[ -z "$pw" ]]; then
+    echo "nats_as: $2 is empty (run scripts/init-env.sh)"
+    return
+  fi
   shift 2
   NATS_PASSWORD="$pw" docker compose run --rm --no-deps -T -e NATS_USER="$user" -e NATS_PASSWORD \
     --entrypoint timeout bus-init 10 nats --timeout 3s "$@" 2>&1 || true
