@@ -816,6 +816,18 @@ services:
       # (dev and prd: from their secret store). Studio runs its migrations on first use.
       BUILDER_DATABASE_URL_BASE: postgres://studio@database:5432/studio?sslmode=disable
       BUILDER_DATABASE_PASSWORD_FILE: /studio-db/studio.password
+      # Public site and lead form (synthwerk#109, #105). The site org is the Zitadel org id of
+      # the org whose live pages the site shows; empty = the public site answers 503. The
+      # origin is where the form posts from and where the confirm link points.
+      NUXT_SITE_ORG_ID: ${SYNTHWERK_STUDIO_SITE_ORG_ID:-}
+      NUXT_SITE_ORIGIN: ${SYNTHWERK_STUDIO_SITE_ORIGIN:-http://localhost:3001}
+      # Lead confirm mails (synthwerk#105). Local and ci: Mailpit over SMTP (D-49). dev and
+      # prd: resend with the API key in a mounted file (NUXT_MAIL_RESEND_API_KEY_FILE),
+      # never in an env file.
+      NUXT_MAIL_PROVIDER: ${SYNTHWERK_STUDIO_MAIL_PROVIDER:-smtp}
+      NUXT_MAIL_FROM: ${SYNTHWERK_STUDIO_MAIL_FROM:-Synthwerk <noreply@synthwerk.localhost>}
+      NUXT_MAIL_SMTP_URL: ${SYNTHWERK_STUDIO_MAIL_SMTP_URL:-smtp://mailpit:1025}
+      NUXT_MAIL_RESEND_API_KEY_FILE: ${SYNTHWERK_STUDIO_RESEND_API_KEY_FILE:-}
     volumes:
       - studio-client:/studio:ro
       - vision-admin:/vision:ro
@@ -834,6 +846,9 @@ services:
       identity:
         condition: service_healthy
       pulse:
+        condition: service_healthy
+      # Lead confirm mails go to Mailpit (synthwerk#105).
+      mailpit:
         condition: service_healthy
       # Only with the vision profile: the token file must exist before studio reads it.
       vision-admin-token:
