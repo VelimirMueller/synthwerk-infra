@@ -488,11 +488,12 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm develop 5b5545c (deploy.yml; widget tokens of identity on the
-  # chat routes, synthwerk#30; CORS per app origin on the widget chat routes), pinned by digest.
+  # Image from synthwerk-llm develop d387ad6 (deploy.yml; widget tokens of identity on the
+  # chat routes, synthwerk#30; CORS per app origin on the widget chat routes, at most 8
+  # origin lookups in flight), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:5b5545cf3b972691c203ce8670802b2f6494b2d7@sha256:5e43da42b64b9861957ea8d5520f72f5bcbc5d2bb00e85ffade524d4b96d6a92
+    image: ghcr.io/velimirmueller/synthwerk-llm:d387ad67a5e1902298f7634968b0996f517229f9@sha256:30f985f67d2e59becfffc24fbccc9cb6fdb1cae15366a92d4ba5b4f4e2b93d1d
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -573,13 +574,13 @@ services:
 
   # synthwerk-vision: image classification for the widgets (synthwerk#36, #44, #76, #77).
   # Profile "vision": the SigLIP 2 image holds about 1.5 GB of weights, too much for
-  # every "up". Image from synthwerk-vision develop 5d15798 (deploy.yml; label sets, widget
-  # tokens, upload quotas, S3 storage), pinned by digest. linux/amd64 only: on an arm64
+  # every "up". Image from synthwerk-vision develop 596589c (deploy.yml; label sets, widget
+  # tokens, upload quotas, S3 storage, CORS per app origin), pinned by digest. linux/amd64 only: on an arm64
   # Mac it runs under emulation and loads slowly.
   vision:
     <<: *hardening
     profiles: [vision]
-    image: ghcr.io/velimirmueller/synthwerk-vision:5d15798bdd78b77c451e970735aee2a4f37668d7@sha256:8baba33a339a87debd178d010e20bb6fddc07792e7401120e8ff36487ab2c8cd
+    image: ghcr.io/velimirmueller/synthwerk-vision:596589c3271ad71b76f013721e2bcc69c3882033@sha256:986e06ef79c9e8cf3ee9f2aa6e5d74f69a2d8069d18998ba8124d63a7efccd84
     read_only: true
     cap_drop: [ALL]
     tmpfs: [/tmp]
@@ -603,8 +604,10 @@ services:
       SYNTHWERK_VISION_OIDC_ISSUER: ${SYNTHWERK_VISION_OIDC_ISSUER:-${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}}
       SYNTHWERK_VISION_JWKS_URL: ${SYNTHWERK_VISION_JWKS_URL:-http://identity:8080/.well-known/jwks.json}
       SYNTHWERK_VISION_OIDC_AUDIENCE: ${SYNTHWERK_VISION_OIDC_AUDIENCE:-synthwerk-api}
-      # Browser origins vision answers CORS for (JSON list). The token still binds each
-      # call to the origin of its app.
+      # Browser origins vision answers CORS for: an origin with an app in identity (vision
+      # asks identity's internal lookup and caches the answer, infra#24) or this static
+      # JSON list (first-party apps). The token still binds each call to the origin of its app.
+      SYNTHWERK_VISION_IDENTITY_URL: http://identity:8080
       SYNTHWERK_VISION_CORS_ORIGINS: ${SYNTHWERK_VISION_CORS_ORIGINS:-["http://localhost:3000","http://localhost:4174","http://localhost:5173"]}
       # The edge takes at most 1 MiB per request (edge-body-limit), so vision takes no more.
       SYNTHWERK_VISION_MAX_UPLOAD_BYTES: "1048576"

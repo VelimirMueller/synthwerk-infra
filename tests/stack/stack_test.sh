@@ -555,6 +555,31 @@ sys.stdout.buffer.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBB
       fail "classification with the widget token: ${out:0:200}"
     fi
 
+    echo "# vision answers CORS per app origin; the edge keeps WAF and body limit (infra#24)"
+    # vpre <origin> <path>: "<status> <Access-Control-Allow-Origin>" of a browser preflight.
+    vpre() {
+      curl -s -o /dev/null -D - --max-time 10 -X OPTIONS -H "Origin: $1" -H 'Access-Control-Request-Method: POST' \
+        -H 'Access-Control-Request-Headers: authorization,content-type' "$VISION$2" |
+        tr -d '\r' | awk -F': ' 'NR == 1 { split($0, a, " "); st = a[2] } tolower($1) == "access-control-allow-origin" { o = $2 } END { print st " " o }'
+    }
+    for path in /v1/classifications /v1/images; do
+      got=$(vpre "$shop" "$path")
+      if [[ "$got" == "204 $shop" ]]; then pass "vision preflight from the app origin $shop, POST $path: 204 with allow-origin"; else fail "vision preflight from $shop, $path: '$got'"; fi
+    done
+    got=$(vpre https://evil.stack.test /v1/classifications)
+    if [[ "$got" == "403 " ]]; then pass "vision preflight from an origin without an app: 403, no allow-origin"; else fail "vision preflight from https://evil.stack.test: '$got'"; fi
+    n=$(curl -s -o /dev/null -D - --max-time 10 -X OPTIONS -H "Origin: $shop" -H 'Access-Control-Request-Method: POST' \
+      "$VISION/v1/classifications" | grep -ic '^access-control-allow-origin:' || true)
+    if [[ "$n" == 1 ]]; then pass "one allow-origin header on the vision preflight"; else fail "allow-origin headers on the vision preflight: $n"; fi
+    acao=$(curl -s -o /dev/null -D - --max-time 30 -H "Authorization: Bearer $wtok" -H "Origin: $shop" "${form[@]}" \
+      "$VISION/v1/classifications" | tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" { print $2 }')
+    if [[ "$acao" == "$shop" ]]; then pass "vision classification from $shop answers with allow-origin $shop"; else fail "vision classification allow-origin: '$acao'"; fi
+    vbig=$(mktemp)
+    head -c 1100000 /dev/zero >"$vbig"
+    expect_status "vision upload over 1 MiB gets 413 at the edge" 413 -H "Authorization: Bearer $wtok" -H "Origin: $shop" \
+      -F "image=@$vbig;type=image/png" "$VISION/v1/images"
+    rm -f "$vbig"
+
     # Uploads land under the org of the token, in the configured backend, within its quota.
     backend=$(setting SYNTHWERK_VISION_STORAGE_BACKEND local)
     quota=$(setting SYNTHWERK_VISION_UPLOAD_QUOTA_FILES 1000)
