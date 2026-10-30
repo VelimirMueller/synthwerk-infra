@@ -409,11 +409,11 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop d4fb74a (deploy.yml; MFA gate, widget tokens, audit of
-  # llm AI settings, synthwerk#39), pinned by digest.
+  # Image from synthwerk-identity develop c73c916 (deploy.yml; MFA gate, widget tokens, audit of
+  # llm AI settings, project id file and grant status events, synthwerk#37), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:d4fb74ad5b4f46a9e6f109be9ff9fd391c1dfa02@sha256:b804c4618c41215b536ba3bb905ca09e46faba837b828d25a05dc9a95466f30e
+    image: ghcr.io/velimirmueller/synthwerk-identity:c73c916283f6f3982cc4a947f4db84fad78b3e49@sha256:1b5fd90ace5c703ff60b3b494bde23e2f6263f4566279a12b534cc2edabda993
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -442,6 +442,10 @@ services:
       SYNTHWERK_IDENTITY_ZITADEL_API_URL: http://zitadel:8080
       SYNTHWERK_IDENTITY_ZITADEL_HOST: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
       SYNTHWERK_IDENTITY_ZITADEL_PAT_FILE: /zitadel/hooks/identity.pat
+      # Project synthwerk-api (synthwerk#37). zitadel-bootstrap makes it after identity
+      # starts and writes its id here; identity reads the file until it holds an id.
+      # Invites answer 503 until then. Older images ignore it.
+      SYNTHWERK_IDENTITY_ZITADEL_PROJECT_ID_FILE: /zitadel/hooks/project-id
       # org.created and member.role_changed go from the outbox to EVT_IDENTITY.
       SYNTHWERK_IDENTITY_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
       # Widget tokens (synthwerk#30): ES256 key from identity-widget-key, issuer = the
