@@ -18,6 +18,7 @@ updated: 2026-10-30
 > - Zitadel is at `http://auth.localhost:8080`. identity and llm are at `/identity` and `/llm` on the edge, with CORS for the local frontends.
 > - Pulse streams the status of each part at `/pulse/v1/health/stream`. A stopped part shows as `down` within 30 s.
 > - `docker compose --profile studio up --build --wait` also builds and starts studio from a synthwerk-studio checkout, at `http://localhost:3001`.
+> - `docker compose --profile vision up --build --wait` also builds and starts vision at `/vision` on the edge. It takes widget tokens from identity.
 
 ## What it does
 
@@ -48,6 +49,12 @@ updated: 2026-10-30
 - Gives pulse the token check (`SYNTHWERK_PULSE_OIDC_*`, `SYNTHWERK_PULSE_PLATFORM_ORG_ID`) and Prometheus in telemetry for the edge numbers (`SYNTHWERK_PULSE_PROMETHEUS_URL=http://telemetry:9090`, synthwerk#40). The edge exports `traefik_service_requests_total` and `traefik_service_request_duration_seconds_bucket` with the labels `service` (for example `llm@file`) and `code`.
 - Gives Zitadel the alias `auth.localhost` on the `app` network, so services in the stack reach the issuer URL (discovery, keys, token exchange). It works only with the default edge port 8080.
 - Profile `studio`: builds synthwerk-studio from a checkout (`SYNTHWERK_STUDIO_SRC`, default `../synthwerk-studio`; `studio/Dockerfile`) and runs it on `127.0.0.1:3001`. It reads the OIDC client from the volume `studio-client` (the bootstrap writes it, owner 65532, mode 0400) and calls identity and pulse inside the stack. The session secret is `SYNTHWERK_STUDIO_SESSION_SECRET`; `NUXT_OIDC_REQUIRE_MFA` follows `SYNTHWERK_ZITADEL_MFA_GATE`.
+- Profile `vision`: builds synthwerk-vision from a pinned commit of its main branch (`SYNTHWERK_VISION_SRC` builds a local checkout instead). synthwerk-vision publishes images only from `develop`, which it does not have yet. `SYNTHWERK_VISION_BACKEND` picks the model at build: `siglip` (default, about 1.5 GB of weights) or `mobilenet` (14 MB, CI).
+- vision checks widget tokens (synthwerk#76): issuer = identity's widget issuer, key set = `http://identity:8080/.well-known/jwks.json`, audience `synthwerk-api`. The token binds each call to the origin of its app.
+- The edge routes only `/vision/v1/classifications`, `/vision/v1/images`, `/vision/healthz` and `/vision/readyz`, with the chain `edge-secure` and no `edge-cors` (vision answers CORS from `SYNTHWERK_VISION_CORS_ORIGINS`). The label admin routes answer 404 on the edge.
+- The one-shot `vision-admin-token` makes the label admin token once per volume `vision-admin` (synthwerk#44). vision reads its copy (uid 10001, mode 0400) into `SYNTHWERK_VISION_ADMIN_TOKEN` at start. studio reads its copy (uid 65532, mode 0400) into `NUXT_VISION_ADMIN_TOKEN` (`studio/start.mjs`) and calls `NUXT_VISION_URL=http://vision:8000`. The token is in no file in git and in no process argument.
+- vision stores uploads per org with a byte and a file quota and a total byte cap (synthwerk#36, #77): `SYNTHWERK_VISION_UPLOAD_QUOTA_BYTES`, `_FILES`, `_TOTAL_BYTES`, `SYNTHWERK_VISION_UPLOAD_WRITERS`. Backend `local` (default, volume `vision-data`) or `s3` (`SYNTHWERK_VISION_STORAGE_BACKEND`).
+- Profile `vision-s3`: Moto as an S3 emulator (`objectstore`, data in memory) and the one-shot `objectstore-bucket`. With `SYNTHWERK_VISION_STORAGE_BACKEND=s3`, vision stores uploads there and `/readyz` checks the bucket.
 - `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm, identity and pulse at it (pulse platform org `stack-platform`). Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
 
 ## How to use
@@ -59,6 +66,7 @@ updated: 2026-10-30
 3. Run `tests/stack/stack_test.sh`.
 4. Open Grafana at `http://localhost:3000`.
    For studio, run `docker compose --profile studio up --build --wait` and open `http://localhost:3001`. Sign-in needs the default edge port 8080.
+   For vision, add `--profile vision` (and `--profile vision-s3` with `SYNTHWERK_VISION_STORAGE_BACKEND=s3`). The stack test then also checks vision.
 5. Watch the status: `curl -N http://127.0.0.1:8080/pulse/v1/health/stream`.
 6. Open Zitadel at `http://auth.localhost:8080`. Browsers and curl send `*.localhost` to 127.0.0.1.
    Mails from Zitadel (invites, verification) land in Mailpit at `http://127.0.0.1:8025` (D-49).
@@ -73,6 +81,9 @@ updated: 2026-10-30
 | Telemetry ports on the host | `127.0.0.1:3000` UI, `4317` OTLP gRPC, `4318` OTLP HTTP |
 | Studio port on the host | `127.0.0.1:3001` (`SYNTHWERK_STUDIO_PORT`), profile `studio` only. Redirect URIs for `:3000` (pnpm dev) and `:3001` are in the bootstrap default. |
 | Other edge port | Set `SYNTHWERK_EDGE_HTTP_PORT`, `SYNTHWERK_ZITADEL_EXTERNAL_PORT` and `SYNTHWERK_ZITADEL_PUBLIC_URL` together (for example 18080), and export `SYNTHWERK_EDGE_HTTP_PORT` for the stack test. Containers then cannot reach the issuer URL: studio sign-in and Zitadel tokens in services need 8080. |
+| Vision upload size | 1 MiB (`SYNTHWERK_VISION_MAX_UPLOAD_BYTES`), the edge body limit. |
+| Vision quotas in the stack | 100 MiB and 1000 files per org, 500 MiB for all orgs (`.env.example`). CI: 3 files per org. |
+| Vision admin token | Made once per volume `vision-admin`; `docker compose down --volumes` makes a new one. |
 | Widget key | Made once per volume; `docker compose down --volumes` makes a new key (widget tokens issued before fail). |
 | New images and older images | The pinned identity, llm and pulse images predate synthwerk#30, #38, #40 and #41. They ignore the new variables, and the stack test skips those checks with a `skip:` line. |
 | Bus and database ports on the host | none |
@@ -115,8 +126,9 @@ updated: 2026-10-30
 - `tests/stack/stack_test.sh` — `apps and widget - owner creates an app; widget settings and preflights from the app origin reach identity, foreign origin 403; widget token iss and origin; P-256 key set on the edge` (skipped with an older identity image)
 - `tests/stack/stack_test.sh` — `export - llm part, complete` and `llm consumer llm-user-deleted on EVT_IDENTITY` (skipped with older images)
 - `tests/stack/stack_test.sh` — `pulse - metrics 401 without a token, 403 as member, edge services from Prometheus as operator; stream with an operator token` (skipped with an older pulse image)
-- `tests/stack/stack_test.sh` — `studio - home 200, health and apps 401 without a session` (profile studio only)
-- `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` and the stack test
+- `tests/stack/stack_test.sh` — `studio - home 200, health, apps and labels 401 without a session; studio container reaches the vision label admin with its token - 200` (profile studio only)
+- `tests/stack/stack_test.sh` — `vision - readyz model ok; classification without, with a forged or a user token - 401; widget token from another origin - 403; widget token from the app origin - 200; upload - 201, past the file quota - 507, objects under the org in the backend; s3 - bucket check ok; label admin on the edge - 404; admin token inside the stack - 200, wrong token - 401` (profile vision only)
+- `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` with the profiles `vision`, `vision-s3` and `studio` (MobileNet, S3 emulator, file quota 3), and the stack test
 
 ## Changes
 
@@ -133,3 +145,4 @@ updated: 2026-10-30
 | 2026-10-28 | Org roles: identity token check, Zitadel grant writes as `identity-sync`, relay to `EVT_IDENTITY`, PATCH on the member route through CORS and WAF (synthwerk#29). |
 | 2026-10-30 | Widget key and issuer, widget routes without edge CORS, export source llm, pulse token check and Prometheus, Zitadel issuer alias, studio profile (synthwerk#30, #37, #38, #40, #41). |
 | 2026-10-30 | Pins identity, llm and pulse images published from `develop` by `deploy.yml`; llm gets `SYNTHWERK_LLM_IDENTITY_URL`, studio gets `NUXT_LLM_URL` (synthwerk#39). |
+| 2026-10-30 | Vision joins the stack with the profiles `vision` and `vision-s3`: widget tokens, label admin token shared with studio, upload quotas, S3 emulator; CI runs them with studio (synthwerk#36, #44, #76, #77). |

@@ -41,6 +41,17 @@ http:
       middlewares: [edge-cors, edge-secure-stream, strip-service-prefix]
       service: llm
 
+    # vision (profile vision): only the widget routes and the health checks. The widget
+    # sends a widget token bound to its origin (synthwerk#76); vision answers CORS from
+    # SYNTHWERK_VISION_CORS_ORIGINS, so edge-cors stays off. The label admin routes take
+    # the service token of the studio server: they stay inside the stack, and the edge
+    # answers 404 for them. Without the profile these routes answer 502.
+    vision:
+      rule: PathRegexp(`^/vision/(v1/(classifications|images)|healthz|readyz)$`)
+      entryPoints: [web]
+      middlewares: [edge-secure, strip-service-prefix]
+      service: vision
+
     # Zitadel on its own host (D-42). The rule is a template: the host comes from
     # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
     # Templating: the Traefik file provider renders Go templates (with Sprig) in
@@ -104,6 +115,11 @@ http:
       loadBalancer:
         servers:
           - url: http://llm:8080
+
+    vision:
+      loadBalancer:
+        servers:
+          - url: http://vision:8000
 
     # The Zitadel API speaks gRPC and HTTP/1.1 on one port without TLS: h2c.
     zitadel:
