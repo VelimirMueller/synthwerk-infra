@@ -761,6 +761,53 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
   else
     echo "info: identity did not confirm the owner (status ${bstatus:-none}), so studio ran no migration yet"
   fi
+
+  echo "# page builder events on the bus and in the audit list (synthwerk#106)"
+  # builder-check created a page as owner.demo, published it twice and rolled it back.
+  # Studio relays builder_events to EVT_STUDIO; identity copies them to its audit list.
+  bus_jsz=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
+  if grep -qE '"name": ?"EVT_STUDIO"' <<<"$bus_jsz"; then pass "studio created the stream EVT_STUDIO"; else fail "no stream EVT_STUDIO on the bus"; fi
+  page_id=$(grep '"builder-check: page published' <<<"$out" | grep -oE '"page_id":"[0-9a-f-]{36}"' | cut -d'"' -f4 | head -n 1 || true)
+  if [[ -n "$page_id" ]]; then
+    pass "builder-check created, published twice and rolled back page $page_id"
+    # sdb / idb <sql>: one value from the studio / the synthwerk database, as the superuser.
+    sdb() { docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d studio -tAc "$1" 2>/dev/null | tr -d '\r' || true; }
+    idb() { docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc "$1" 2>/dev/null | tr -d '\r' || true; }
+    relayed=""
+    for _ in $(seq 1 30); do
+      relayed=$(sdb "SELECT count(*) FILTER (WHERE relayed_at IS NOT NULL AND relay_error IS NULL) || '/' || count(*) FROM builder_events WHERE subject = '$page_id'")
+      [[ "$relayed" == 4/4 ]] && break
+      sleep 1
+    done
+    if [[ "$relayed" == 4/4 ]]; then pass "studio relayed the 4 page events (relayed_at set, no relay_error)"; else fail "relayed page events: '${relayed:-none}', want 4/4"; fi
+    audit=""
+    for _ in $(seq 1 30); do
+      audit=$(idb "SELECT string_agg(split_part(type, '.', 5), ',' ORDER BY seq) FROM identity.audit_events WHERE subject = '$page_id'")
+      [[ "$audit" == created,published,published,rolled_back ]] && break
+      sleep 1
+    done
+    if [[ "$audit" == created,published,published,rolled_back ]]; then pass "identity audit list holds create, publish, publish, roll back of the page"; else fail "audit rows of the page: '${audit:-none}'"; fi
+    row=$(idb "SELECT a.actor LIKE 'user:%' AND a.org_id::text = a.data->>'org_id' AND a.data->>'page_id' = '$page_id'
+      AND (a.data->>'version')::int = 1 AND (a.data->>'previous_version')::int = 2
+      AND EXISTS (SELECT 1 FROM identity.memberships m WHERE m.org_id = a.org_id AND 'user:' || m.user_sub = a.actor AND m.role = 'owner')
+      FROM identity.audit_events a WHERE a.subject = '$page_id' AND a.type = 'dev.synthwerk.studio.page.rolled_back.v1'")
+    if [[ "$row" == t ]]; then pass "roll back row: actor is the owner, org and page match, version 1 after 2"; else fail "roll back audit row: '${row:-none}'"; fi
+    leak=$(idb "SELECT count(*) FROM identity.audit_events WHERE subject = '$page_id' AND data::text LIKE '%Audit check%'")
+    if [[ "$leak" == 0 ]]; then pass "no page text in the audit rows"; else fail "page text in $leak audit rows"; fi
+    # A repeat of the outbox rows: studio sends them again, nothing new in the audit list.
+    sdb "UPDATE builder_events SET relayed_at = NULL WHERE subject = '$page_id'" >/dev/null
+    again=""
+    for _ in $(seq 1 30); do
+      again=$(sdb "SELECT count(*) FROM builder_events WHERE subject = '$page_id' AND relayed_at IS NULL")
+      [[ "$again" == 0 ]] && break
+      sleep 1
+    done
+    sleep 3
+    n=$(idb "SELECT count(*) FROM identity.audit_events WHERE subject = '$page_id'")
+    if [[ "$again" == 0 && "$n" == 4 ]]; then pass "a second relay of the same rows adds no audit row (4)"; else fail "after a repeat: unrelayed '$again', audit rows '$n'"; fi
+  else
+    fail "builder-check gave no page id: $(grep -o '"err":"[^"]*"' <<<"$out" | head -n 1 || true)"
+  fi
 else
   echo "skip: studio is not running (docker compose --profile studio up --build --wait)"
 fi
