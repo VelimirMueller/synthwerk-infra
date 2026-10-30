@@ -17,8 +17,10 @@ http:
       service: pulse
 
     # identity: JSON API for the browser. CORS first, then the normal chain.
+    # /identity/internal/* stays inside the stack (llm asks it which origins have an app):
+    # no router matches it, so the edge answers 404.
     identity:
-      rule: PathPrefix(`/identity/`)
+      rule: PathPrefix(`/identity/`) && !PathPrefix(`/identity/internal/`)
       entryPoints: [web]
       middlewares: [edge-cors, edge-secure, strip-service-prefix]
       service: identity
@@ -39,6 +41,17 @@ http:
       rule: PathPrefix(`/llm/`)
       entryPoints: [web]
       middlewares: [edge-cors, edge-secure-stream, strip-service-prefix]
+      service: llm
+
+    # llm widget chat routes (create, read, send): the chat widget calls them from
+    # customer sites with a widget token. llm answers CORS itself: an origin of an app
+    # (asked from identity, cached) or SYNTHWERK_LLM_CORS_ORIGINS; every other origin
+    # gets no CORS headers. So edge-cors stays off, like on the identity widget routes.
+    # The longer rule wins over "llm".
+    llm-widget:
+      rule: PathRegexp(`^/llm/v1/conversations(/[^/]+(/messages)?)?$`)
+      entryPoints: [web]
+      middlewares: [edge-secure-stream, strip-service-prefix]
       service: llm
 
     # vision (profile vision): only the widget routes and the health checks. The widget

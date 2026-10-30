@@ -488,6 +488,37 @@ if tests/stack/issuer.sh active; then
       expect_status "widget token on the AI settings: 403" 403 "${wauth[@]}" -H "Origin: $shop" "$EDGE/llm/v1/ai-settings"
       expect_status "widget token changes the AI settings: 403" 403 -X PUT "${wauth[@]}" -H "Origin: $shop" \
         --data '{"version":0}' "$EDGE/llm/v1/ai-settings"
+
+      echo "# llm answers CORS on the widget chat routes per app origin (infra#21 follow-up)"
+      # lpre <origin> <method> <path>: "<status> <Access-Control-Allow-Origin>" of a browser
+      # preflight through the edge. The edge has no edge-cors on these routes: llm answers.
+      lpre() {
+        curl -s -o /dev/null -D - --max-time 10 -X OPTIONS -H "Origin: $1" -H "Access-Control-Request-Method: $2" \
+          -H 'Access-Control-Request-Headers: authorization,content-type' "$EDGE/llm$3" |
+          tr -d '\r' | awk -F': ' 'NR == 1 { split($0, a, " "); st = a[2] } tolower($1) == "access-control-allow-origin" { o = $2 } END { print st " " o }'
+      }
+      for route in "POST /v1/conversations" "GET /v1/conversations/$wconv" "POST /v1/conversations/$wconv/messages"; do
+        got=$(lpre "$shop" ${route% *} "${route#* }")
+        if [[ "$got" == "204 $shop" ]]; then pass "preflight from the app origin $shop, $route: 204 with allow-origin"; else fail "preflight from $shop, $route: '$got'"; fi
+      done
+      got=$(lpre https://evil.stack.test POST /v1/conversations)
+      if [[ "$got" == "403 " ]]; then pass "preflight from an origin without an app: 403, no allow-origin"; else fail "preflight from https://evil.stack.test: '$got'"; fi
+      got=$(lpre "$shop" DELETE "/v1/conversations/$wconv")
+      if [[ "$got" == "403 " ]]; then pass "preflight for a method the route does not take: 403"; else fail "preflight DELETE from $shop: '$got'"; fi
+      first="${SYNTHWERK_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}"
+      first="${first%%,*}"
+      got=$(lpre "$first" POST /v1/conversations)
+      if [[ "$got" == "204 $first" ]]; then pass "preflight from the first-party origin $first: 204"; else fail "preflight from $first: '$got'"; fi
+      # Only llm answers here: a second allow-origin from the edge would make the browser refuse it.
+      n=$(curl -s -o /dev/null -D - --max-time 10 -X OPTIONS -H "Origin: $first" -H 'Access-Control-Request-Method: POST' \
+        "$EDGE/llm/v1/conversations" | grep -ic '^access-control-allow-origin:' || true)
+      if [[ "$n" == 1 ]]; then pass "one allow-origin header on the widget route preflight"; else fail "allow-origin headers on the widget route preflight: $n"; fi
+      got=$(lpre "$shop" GET /v1/ai-settings)
+      if [[ "$got" != *" $shop" ]]; then pass "other llm routes keep edge-cors: no allow-origin for $shop"; else fail "AI settings preflight from $shop: '$got'"; fi
+      acao=$(curl -s -o /dev/null -D - --max-time 10 "${wauth[@]}" -H "Origin: $shop" "$EDGE/llm/v1/conversations/$wconv" |
+        tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" { print $2 }')
+      if [[ "$acao" == "$shop" ]]; then pass "widget read from $shop answers with allow-origin $shop"; else fail "widget read allow-origin: '$acao'"; fi
+      expect_status "identity internal routes are not on the edge: 404" 404 "$EDGE/identity/internal/v1/widget-origins?origin=https%3A%2F%2Fshop.stack.test"
     fi
   fi
 
