@@ -408,12 +408,12 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop 5e7587f (deploy.yml; MFA gate, widget tokens, audit of
+  # Image from synthwerk-identity develop dd30bea (deploy.yml; MFA gate, widget tokens, audit of
   # llm AI settings, project id file and grant status events, account delete with the ID
-  # token step-up, synthwerk#41), pinned by digest.
+  # token step-up, synthwerk#41, internal widget origin lookup for llm), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:5e7587f308fc847e3c25de624bab7d827dfde771@sha256:d5f2dffb7dd6cd59111f2d40a8ff154b858f7fa11e857c9d47c431b239b60534
+    image: ghcr.io/velimirmueller/synthwerk-identity:dd30bea3dbd8c892a12edaacb05e697976f8c8fe@sha256:6a94a8aa52b3c905924a507545f001827dddfda2a76bdcd14b5442f7c7a1d625
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -488,11 +488,11 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm develop 4d0d2d2 (deploy.yml; widget tokens of identity on the
-  # chat routes, synthwerk#30), pinned by digest.
+  # Image from synthwerk-llm develop 5b5545c (deploy.yml; widget tokens of identity on the
+  # chat routes, synthwerk#30; CORS per app origin on the widget chat routes), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:4d0d2d2e87399338a523d11e71f192f7cb31eae4@sha256:03990d65502fe4f6130952318d9fd4931d0e144db805da403f0006fc93384c4a
+    image: ghcr.io/velimirmueller/synthwerk-llm:5b5545cf3b972691c203ce8670802b2f6494b2d7@sha256:5e43da42b64b9861957ea8d5520f72f5bcbc5d2bb00e85ffade524d4b96d6a92
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -520,7 +520,11 @@ services:
       SYNTHWERK_LLM_WIDGET_JWKS_URL: ${SYNTHWERK_LLM_WIDGET_JWKS_URL:-http://identity:8080/.well-known/jwks.json}
       SYNTHWERK_LLM_WIDGET_AUDIENCE: ${SYNTHWERK_LLM_WIDGET_AUDIENCE:-synthwerk-api}
       # AI settings (synthwerk#39): llm checks membership and plan limit with identity.
+      # Widget CORS: llm asks identity which origins have an app (cached).
       SYNTHWERK_LLM_IDENTITY_URL: http://identity:8080
+      # The edge answers no CORS on the widget chat routes, so llm answers it for the
+      # first-party browser apps too: the same list as the edge.
+      SYNTHWERK_LLM_CORS_ORIGINS: ${SYNTHWERK_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
     networks: [app, data]
     depends_on:
       database-init:
