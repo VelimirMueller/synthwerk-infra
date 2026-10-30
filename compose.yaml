@@ -539,12 +539,13 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm develop d387ad6 (deploy.yml; widget tokens of identity on the
+  # Image from synthwerk-llm develop 0b560c1 (deploy.yml; widget tokens of identity on the
   # chat routes, synthwerk#30; CORS per app origin on the widget chat routes, at most 8
-  # origin lookups in flight), pinned by digest.
+  # origin lookups in flight; fallback provider chain, synthwerk#56, off while
+  # SYNTHWERK_LLM_FALLBACKS is unset), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:d387ad67a5e1902298f7634968b0996f517229f9@sha256:30f985f67d2e59becfffc24fbccc9cb6fdb1cae15366a92d4ba5b4f4e2b93d1d
+    image: ghcr.io/velimirmueller/synthwerk-llm:0b560c1e398b5395f4791b309aceb07bf7cd220a@sha256:8fb3235d72658e05223d7dc4ab5c9dff4a67e493e260ec0e277ad7ae49d81aba
     read_only: true
     cap_drop: [ALL]
     environment:
