@@ -44,6 +44,20 @@ var ErrMFARefused = errors.New("the MFA gate refused the sign-in")
 // It returns the access token claims. A refusal of the MFA gate wraps
 // ErrMFARefused. Use it for local and ci checks only.
 func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redirectURI string, checks map[string]any) (map[string]any, error) {
+	t, err := MintTokens(ctx, c, loginPAT, sc, redirectURI, checks, nil)
+	if err != nil {
+		return nil, err
+	}
+	return jwtClaims(t.Access)
+}
+
+// Tokens are the access token and the ID token of one sign-in.
+type Tokens struct{ Access, ID string }
+
+// MintTokens is Mint that returns both raw tokens. extra adds authorize
+// parameters, such as prompt=login and max_age=0 of the studio step-up; it must
+// not hold a built-in one (client_id, scope, PKCE ...).
+func MintTokens(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redirectURI string, checks map[string]any, extra url.Values) (Tokens, error) {
 	verifier := rand.Text() + rand.Text()
 	sum := sha256.Sum256([]byte(verifier))
 	q := url.Values{
@@ -55,13 +69,19 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 		"code_challenge_method": {"S256"},
 		"state":                 {"selftest"},
 	}
+	for k, v := range extra {
+		if _, set := q[k]; set {
+			return Tokens{}, fmt.Errorf("authorize: extra parameter %q would replace a built-in one", k)
+		}
+		q[k] = v
+	}
 	loc, err := c.redirect(ctx, "/oauth/v2/authorize?"+q.Encode())
 	if err != nil {
-		return nil, err
+		return Tokens{}, err
 	}
 	authRequest := loc.Query().Get("authRequest")
 	if authRequest == "" {
-		return nil, fmt.Errorf("authorize: no authRequest in redirect %q", loc.Path)
+		return Tokens{}, fmt.Errorf("authorize: no authRequest in redirect %q", loc.Path)
 	}
 
 	login := &Client{BaseURL: c.BaseURL, Host: c.Host, Token: loginPAT, HTTP: c.HTTP}
@@ -70,7 +90,7 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 		SessionToken string `json:"sessionToken"`
 	}
 	if err := login.Do(ctx, http.MethodPost, "/v2/sessions", "", map[string]any{"checks": checks}, &sess); err != nil {
-		return nil, fmt.Errorf("session: %w", err)
+		return Tokens{}, fmt.Errorf("session: %w", err)
 	}
 	var cb struct {
 		CallbackURL string `json:"callbackUrl"`
@@ -80,23 +100,23 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 	}, &cb); err != nil {
 		var e *APIError
 		if errors.As(err, &e) && e.Status == http.StatusForbidden && strings.Contains(e.Message, "mfa_required") {
-			return nil, fmt.Errorf("finalize auth request: %w: %w", ErrMFARefused, err)
+			return Tokens{}, fmt.Errorf("finalize auth request: %w: %w", ErrMFARefused, err)
 		}
-		return nil, fmt.Errorf("finalize auth request: %w", err)
+		return Tokens{}, fmt.Errorf("finalize auth request: %w", err)
 	}
 	cbURL, err := url.Parse(cb.CallbackURL)
 	if err != nil {
-		return nil, err
+		return Tokens{}, err
 	}
 	code := cbURL.Query().Get("code")
 	if code == "" {
-		return nil, fmt.Errorf("callback has no code (error %q)", cbURL.Query().Get("error"))
+		return Tokens{}, fmt.Errorf("callback has no code (error %q)", cbURL.Query().Get("error"))
 	}
 
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI}, "code_verifier": {verifier}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/oauth/v2/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return Tokens{}, err
 	}
 	req.Host = c.Host
 	// RFC 6749 section 2.3.1: id and secret are form-encoded before Basic auth.
@@ -104,12 +124,12 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return Tokens{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("token: read body: %w", err)
+		return Tokens{}, fmt.Errorf("token: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// An OAuth error body (error, error_description) holds no token.
@@ -118,15 +138,16 @@ func Mint(ctx context.Context, c *Client, loginPAT string, sc StudioClient, redi
 			Description string `json:"error_description"`
 		}
 		_ = json.Unmarshal(body, &e)
-		return nil, fmt.Errorf("token: status %d, %s: %s", resp.StatusCode, e.Error, e.Description)
+		return Tokens{}, fmt.Errorf("token: status %d, %s: %s", resp.StatusCode, e.Error, e.Description)
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
 	}
 	if err := json.Unmarshal(body, &tok); err != nil {
-		return nil, err
+		return Tokens{}, err
 	}
-	return jwtClaims(tok.AccessToken)
+	return Tokens{Access: tok.AccessToken, ID: tok.IDToken}, nil
 }
 
 // CheckRoles is the claim contract the platform depends on (D-50): the token

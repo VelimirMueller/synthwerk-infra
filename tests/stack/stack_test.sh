@@ -586,6 +586,36 @@ except e.HTTPError as x: print(x.code)\" \"$1\"" 2>/dev/null | tr -d '\r' || tru
 
   leak=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event::text LIKE '%example.test%'")
   if [[ "$leak" == 0 ]]; then pass "no email in identity events"; else fail "identity events hold an email"; fi
+
+  echo "# account delete with real Zitadel tokens and the ID token step-up (synthwerk#41)"
+  # identity trusts the stack test issuer above. For this check it trusts Zitadel like on dev:
+  # the issuer inside the stack (alias on zitadel, Zitadel's own port 8080), the key set from
+  # discovery, and the project id as audience. The shell values win over .env. Restored below.
+  if SYNTHWERK_IDENTITY_OIDC_ISSUER="http://$auth_domain:8080" SYNTHWERK_IDENTITY_OIDC_AUDIENCE="$project" \
+    SYNTHWERK_IDENTITY_JWKS_URL="" docker compose up -d --wait --no-deps identity >/dev/null 2>&1; then
+    # A throwaway user signs in with password and TOTP and the studio step-up (prompt=login,
+    # max_age=0), then calls DELETE /v1/me without and with its fresh ID token.
+    out=$(docker compose run --rm --no-deps zitadel-bootstrap delete-check 2>&1 || true)
+    status_of() { grep "$1" <<<"$out" | grep -o '"status":[0-9]*' | cut -d: -f2 | head -n 1; }
+    code=$(status_of 'without ID token')
+    if [[ "$code" == 403 && "$out" == *'"code":"recent_mfa_required"'* ]]; then pass "delete without X-Synthwerk-Id-Token: 403 recent_mfa_required"; else fail "delete without ID token: status '${code:-none}' $(grep -o '"err":"[^"]*"' <<<"$out" || true)"; fi
+    code=$(status_of 'with the fresh ID token')
+    if [[ "$code" == 202 ]]; then pass "delete with a fresh step-up ID token (aud = studio client id from the mounted file): 202"; else fail "delete with the ID token: status '${code:-none}' $(grep -o '"err":"[^"]*"' <<<"$out" || true)"; fi
+    gone=$(grep '"msg":"delete-check ok"' <<<"$out" | grep -oE '"user_id":"[0-9]+"' | cut -d'"' -f4 || true)
+    if [[ -n "$gone" ]]; then
+      # The remover runs every 30 s and deletes the Zitadel user as identity-sync.
+      user=""
+      for _ in $(seq 1 30); do
+        user=$(zapi GET "/v2/users/$gone" -)
+        [[ "$user" == *'"code":5'* || "$user" == *NotFound* || "$user" == *"not found"* ]] && break
+        sleep 3
+      done
+      if [[ "$user" == *'"code":5'* || "$user" == *NotFound* || "$user" == *"not found"* ]]; then pass "identity removed the deleted user from Zitadel"; else fail "Zitadel user $gone still there: ${user:0:160}"; fi
+    fi
+  else
+    fail "identity did not start with the Zitadel issuer"
+  fi
+  if docker compose up -d --wait --no-deps identity >/dev/null 2>&1; then pass "identity back on the stack test issuer"; else fail "identity did not come back on the stack test issuer"; fi
 else
   echo "skip: identity does not trust the stack test issuer (run tests/stack/issuer.sh setup before compose up)"
 fi

@@ -4,14 +4,13 @@
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
 #   docker compose --profile ollama up --wait   # also start Ollama
-#   docker compose --profile vision up --build --wait   # also build and start vision
-#   docker compose --profile vision --profile vision-s3 up --build --wait
+#   docker compose --profile vision up --wait   # also start vision
+#   docker compose --profile vision --profile vision-s3 up --wait
 #                                  # vision on the S3 emulator (set SYNTHWERK_VISION_STORAGE_BACKEND=s3)
 #   docker compose --profile studio up --build --wait   # also build and start studio
 #
-# Every image is pinned by tag and digest. Renovate bumps both. Studio and vision have
-# no published image yet: their profiles build them from source (studio/Dockerfile;
-# vision from a pinned commit of synthwerk-vision).
+# Every image is pinned by tag and digest. Renovate bumps both. Studio has no
+# published image yet: its profile builds it from source (studio/Dockerfile).
 name: synthwerk
 
 x-hardening: &hardening
@@ -409,11 +408,12 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop c73c916 (deploy.yml; MFA gate, widget tokens, audit of
-  # llm AI settings, project id file and grant status events, synthwerk#37), pinned by digest.
+  # Image from synthwerk-identity develop 5e7587f (deploy.yml; MFA gate, widget tokens, audit of
+  # llm AI settings, project id file and grant status events, account delete with the ID
+  # token step-up, synthwerk#41), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:c73c916283f6f3982cc4a947f4db84fad78b3e49@sha256:1b5fd90ace5c703ff60b3b494bde23e2f6263f4566279a12b534cc2edabda993
+    image: ghcr.io/velimirmueller/synthwerk-identity:5e7587f308fc847e3c25de624bab7d827dfde771@sha256:d5f2dffb7dd6cd59111f2d40a8ff154b858f7fa11e857c9d47c431b239b60534
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -432,6 +432,10 @@ services:
       SYNTHWERK_IDENTITY_TOKEN_CLAIMS_KEY_FILE: /zitadel/hooks/identity-token-claims.key
       # Org roles (synthwerk#29). Token check like llm: Zitadel by default; the stack
       # test points these at its own issuer (tests/stack/issuer.sh).
+      # Audience: Zitadel access tokens carry aud [client id, project id], never
+      # synthwerk-api. With Zitadel tokens set it to the project id of synthwerk-api
+      # (scripts/zitadel-audience.sh writes it to .env). The default fits only the
+      # stack test issuer.
       SYNTHWERK_IDENTITY_OIDC_ISSUER: ${SYNTHWERK_IDENTITY_OIDC_ISSUER:-http://auth.localhost:8080}
       SYNTHWERK_IDENTITY_OIDC_AUDIENCE: ${SYNTHWERK_IDENTITY_OIDC_AUDIENCE:-synthwerk-api}
       SYNTHWERK_IDENTITY_JWKS_URL: ${SYNTHWERK_IDENTITY_JWKS_URL:-}
@@ -455,9 +459,15 @@ services:
       SYNTHWERK_IDENTITY_WIDGET_ISSUER: ${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}
       # Own-data export (synthwerk#41): identity asks llm for its part of GET /v1/me/export.
       SYNTHWERK_IDENTITY_EXPORT_SOURCES: llm=http://llm:8080
+      # Account delete (synthwerk#41): DELETE /v1/me takes the studio's fresh ID token in
+      # X-Synthwerk-Id-Token. Its aud must be the studio client id, read from this file per
+      # call: zitadel-bootstrap writes it after identity starts (owner 65532, mode 0400).
+      # Without it every delete with Zitadel tokens gets 403.
+      SYNTHWERK_IDENTITY_ID_TOKEN_CLIENT_FILE: /zitadel/studio/studio-client.json
     volumes:
       - zitadel-hooks:/zitadel/hooks:ro
       - identity-keys:/keys:ro
+      - studio-client:/zitadel/studio:ro
     networks:
       app: {}
       data: {}
@@ -558,21 +568,14 @@ services:
     network_mode: none
 
   # synthwerk-vision: image classification for the widgets (synthwerk#36, #44, #76, #77).
-  # Profile "vision": the default SigLIP 2 build fetches about 1.5 GB of weights, too slow
-  # for every "up". synthwerk-vision publishes images only from develop, which it does
-  # not have yet, so compose builds the pinned main commit below (Renovate cannot bump
-  # it: change the SHA in context and COMMIT together). SYNTHWERK_VISION_SRC=../synthwerk-vision
-  # builds a local checkout instead. SYNTHWERK_VISION_BACKEND=mobilenet builds the small
-  # model (14 MB, ImageNet classes; CI uses it). Rebuild after a change: up --build.
+  # Profile "vision": the SigLIP 2 image holds about 1.5 GB of weights, too much for
+  # every "up". Image from synthwerk-vision develop 5d15798 (deploy.yml; label sets, widget
+  # tokens, upload quotas, S3 storage), pinned by digest. linux/amd64 only: on an arm64
+  # Mac it runs under emulation and loads slowly.
   vision:
     <<: *hardening
     profiles: [vision]
-    build:
-      context: ${SYNTHWERK_VISION_SRC:-https://github.com/VelimirMueller/synthwerk-vision.git#5d15798bdd78b77c451e970735aee2a4f37668d7}
-      args:
-        BACKEND: ${SYNTHWERK_VISION_BACKEND:-siglip}
-        COMMIT: 5d15798bdd78b77c451e970735aee2a4f37668d7
-    image: synthwerk-vision:local
+    image: ghcr.io/velimirmueller/synthwerk-vision:5d15798bdd78b77c451e970735aee2a4f37668d7@sha256:8baba33a339a87debd178d010e20bb6fddc07792e7401120e8ff36487ab2c8cd
     read_only: true
     cap_drop: [ALL]
     tmpfs: [/tmp]
