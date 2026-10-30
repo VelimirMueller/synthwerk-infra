@@ -35,7 +35,7 @@ expect_status() {
 
 # One-shot services: they must have exited with code 0, not be healthy.
 # Space on both ends: the loop matches *" $svc "*.
-oneshot=" database-init studio-db-secret identity-widget-key zitadel-bootstrap ollama-pull vision-admin-token objectstore-bucket "
+oneshot=" bus-init database-init studio-db-secret identity-widget-key zitadel-bootstrap ollama-pull vision-admin-token objectstore-bucket "
 
 # setting <name> <default>: a stack setting as compose reads it: the shell first, then .env.
 setting() {
@@ -766,7 +766,7 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
   # builder-check created a page as owner.demo, published it twice and rolled it back.
   # Studio relays builder_events to EVT_STUDIO; identity copies them to its audit list.
   bus_jsz=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
-  if grep -qE '"name": ?"EVT_STUDIO"' <<<"$bus_jsz"; then pass "studio created the stream EVT_STUDIO"; else fail "no stream EVT_STUDIO on the bus"; fi
+  if grep -qE '"name": ?"EVT_STUDIO"' <<<"$bus_jsz"; then pass "bus-init created the stream EVT_STUDIO"; else fail "no stream EVT_STUDIO on the bus"; fi
   page_id=$(grep '"builder-check: page published' <<<"$out" | grep -oE '"page_id":"[0-9a-f-]{36}"' | cut -d'"' -f4 | head -n 1 || true)
   if [[ -n "$page_id" ]]; then
     pass "builder-check created, published twice and rolled back page $page_id"
@@ -811,6 +811,42 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
 else
   echo "skip: studio is not running (docker compose --profile studio up --build --wait)"
 fi
+
+echo "# NATS least privilege: studio and identity users (synthwerk#106)"
+# nats_as <user> <password variable> <nats args...>: the nats CLI of bus-init as that user,
+# stopped after 10 s. The password goes through the environment, never on the command line.
+nats_as() {
+  local user=$1 pw
+  pw=$(setting "$2" "")
+  shift 2
+  NATS_PASSWORD="$pw" docker compose run --rm --no-deps -T -e NATS_USER="$user" -e NATS_PASSWORD \
+    --entrypoint timeout bus-init 10 nats --timeout 3s "$@" 2>&1 || true
+}
+# refused <name> <subject kind> <subject> <output>: pass when NATS refused exactly that subject.
+refused() {
+  if grep -qF "Permissions Violation for $2 to \"$3\"" <<<"$4"; then pass "$1"; else fail "$1: ${4:0:200}"; fi
+}
+out=$(nats_as studio SYNTHWERK_NATS_STUDIO_PASSWORD sub '_INBOX.>' --count 1)
+refused "studio may not subscribe to the shared _INBOX.>" Subscription '_INBOX.>' "$out"
+out=$(nats_as studio SYNTHWERK_NATS_STUDIO_PASSWORD --inbox-prefix _INBOX_studio \
+  req '$JS.API.STREAM.UPDATE.EVT_STUDIO' '{"name":"EVT_STUDIO","subjects":["evt.>"]}')
+refused "studio may not update the stream EVT_STUDIO" Publish '$JS.API.STREAM.UPDATE.EVT_STUDIO' "$out"
+out=$(nats_as studio SYNTHWERK_NATS_STUDIO_PASSWORD pub evt.identity.org.created.v1 '{}')
+refused "studio may not publish outside evt.studio.>" Publish 'evt.identity.org.created.v1' "$out"
+out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD sub '_INBOX.>' --count 1)
+refused "identity may not subscribe to the shared _INBOX.>" Subscription '_INBOX.>' "$out"
+out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD --inbox-prefix _INBOX_identity \
+  req '$JS.API.CONSUMER.CREATE.EVT_STUDIO.other' '{"stream_name":"EVT_STUDIO","config":{"durable_name":"other","ack_policy":"explicit"}}')
+refused "identity may not create another durable on EVT_STUDIO" Publish '$JS.API.CONSUMER.CREATE.EVT_STUDIO.other' "$out"
+out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD --inbox-prefix _INBOX_identity \
+  req '$JS.API.CONSUMER.INFO.EVT_STUDIO.identity-studio-pages' '')
+if grep -q '"name": *"identity-studio-pages"' <<<"$out"; then pass "identity reads its own durable identity-studio-pages"; else fail "identity durable info: ${out:0:200}"; fi
+cfg=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true&config=true' 2>/dev/null || true)
+subjects=$(python3 -c 'import json, sys
+d = json.load(sys.stdin)
+print(",".join(s for a in d.get("account_details", []) for st in a.get("stream_detail", [])
+               if st["name"] == "EVT_STUDIO" for s in st["config"]["subjects"]))' <<<"$cfg" 2>/dev/null || true)
+if [[ "$subjects" == 'evt.studio.>' ]]; then pass "EVT_STUDIO keeps the subjects evt.studio.>"; else fail "EVT_STUDIO subjects: '${subjects:-none}'"; fi
 
 echo "# mascot: public answers with sources, per-client rate limit, no egress (synthwerk#48)"
 MASCOT="$EDGE/mascot"

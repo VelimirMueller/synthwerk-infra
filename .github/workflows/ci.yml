@@ -119,12 +119,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # synthwerk-studio main 41f90ac (page builder, public site, relay to EVT_STUDIO, synthwerk#106). Bump the SHA by hand.
+      # synthwerk-studio main 8045a81 (page builder, public site, relay to EVT_STUDIO with least NATS rights, synthwerk#106). Bump the SHA by hand.
       - name: Check out synthwerk-studio for the studio profile
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: VelimirMueller/synthwerk-studio
-          ref: 41f90ac2c0da31f4e11354b0ab98ae384c5c1d4b
+          ref: 8045a811de033e56c45c6cba10531184b5b482c0
           path: .studio-src
           persist-credentials: false
       - name: Check the shell scripts with bash and shellcheck
