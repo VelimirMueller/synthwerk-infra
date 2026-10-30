@@ -119,12 +119,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # synthwerk-studio main d20c277 (label admin, synthwerk#44). Bump the SHA by hand.
+      # synthwerk-studio main 1ec1f14 (page builder, synthwerk#46). Bump the SHA by hand.
       - name: Check out synthwerk-studio for the studio profile
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: VelimirMueller/synthwerk-studio
-          ref: d20c277f29ad0fe739722ab7879655512e72eb2b
+          ref: 1ec1f144de6e852eb4342aed60322b13710663ac
           path: .studio-src
           persist-credentials: false
       - name: Check the shell scripts with bash and shellcheck

@@ -35,7 +35,7 @@ expect_status() {
 
 # One-shot services: they must have exited with code 0, not be healthy.
 # Space on both ends: the loop matches *" $svc "*.
-oneshot=" database-init identity-widget-key zitadel-bootstrap ollama-pull vision-admin-token objectstore-bucket "
+oneshot=" database-init studio-db-secret identity-widget-key zitadel-bootstrap ollama-pull vision-admin-token objectstore-bucket "
 
 # setting <name> <default>: a stack setting as compose reads it: the shell first, then .env.
 setting() {
@@ -160,6 +160,14 @@ out=$(psql_as llm 'SELECT count(*) FROM identity.synthwerk_outbox')
 if [[ "$out" == *"permission denied"* ]]; then pass "llm cannot read the identity schema"; else fail "llm can read the identity schema"; fi
 out=$(psql_as llm 'SELECT 1' zitadel)
 if [[ "$out" == *"permission denied"* ]]; then pass "llm cannot connect to the zitadel database"; else fail "llm can connect to the zitadel database"; fi
+# The studio database belongs to the role studio alone (synthwerk#107).
+for role in identity llm; do
+  out=$(psql_as "$role" 'SELECT 1' studio)
+  if [[ "$out" == *"permission denied"* ]]; then pass "$role cannot connect to the studio database"; else fail "$role can connect to the studio database: ${out:0:120}"; fi
+done
+owner=$(docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc \
+  "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'studio'" 2>/dev/null | tr -d '\r' || true)
+if [[ "$owner" == studio ]]; then pass "database studio is owned by the role studio"; else fail "owner of database studio: '${owner:-none}'"; fi
 
 echo "# CORS on /llm and /identity"
 # cors_origin <origin>: the Access-Control-Allow-Origin of a preflight, or empty.
@@ -696,8 +704,154 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
   else
     echo "skip: vision is not running, so studio has no label admin to reach"
   fi
+
+  echo "# studio page builder database (synthwerk#107)"
+  # studio/start.mjs builds NUXT_BUILDER_DATABASE_URL from the password file of studio-db-secret
+  # and connects with it: the role and the database must both be "studio".
+  out=$(docker compose exec -T studio node /app/start.mjs builder-db-check 2>&1 | tr -d '\r' || true)
+  if [[ "$out" == *'"role":"studio","db":"studio","can_create":true'* ]]; then pass "studio connects to its own database as role studio and may create tables"; else fail "studio builder database: ${out:0:200}"; fi
+  # The password lives in the volume only: read it from the studio container, never print it.
+  studio_pw=$(docker compose exec -T studio cat /studio-db/studio.password 2>/dev/null | tr -d '\r\n' || true)
+  if [[ -n "$studio_pw" ]] && ! grep -qF -- "$studio_pw" .env compose.yaml; then pass "studio database password is in the volume, not in .env or compose.yaml"; else fail "studio database password missing or in a file of the repo"; fi
+  out=$(docker compose exec -T -e PGPASSWORD="$studio_pw" database psql -h 127.0.0.1 -U studio -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc 'SELECT 1' 2>&1 || true)
+  if [[ "$out" == *"permission denied"* ]]; then pass "role studio cannot connect to the synthwerk database"; else fail "role studio reaches the synthwerk database: ${out:0:120}"; fi
+  unset studio_pw
+  expect_status "builder without a session: 401" 401 "$STUDIO/api/builder/pages"
+  # A signed-in owner: owner.demo signs in through the studio code flow (password and TOTP).
+  # Without a database URL the builder answers such a session 503 builder_not_configured.
+  # The builder confirms the role in identity with the Zitadel token, so for this check
+  # identity trusts Zitadel like on dev (as for the account delete above). Restored below.
+  sproject=$(docker compose exec -T studio node -e "console.log(JSON.parse(require('node:fs').readFileSync('/studio/studio-client.json', 'utf8')).project_id ?? '')" 2>/dev/null | tr -d '\r' || true)
+  sdomain=$(setting SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN auth.localhost)
+  if [[ -n "$sproject" ]] && SYNTHWERK_IDENTITY_OIDC_ISSUER="http://$sdomain:8080" SYNTHWERK_IDENTITY_OIDC_AUDIENCE="$sproject" \
+    SYNTHWERK_IDENTITY_JWKS_URL="" docker compose up -d --wait --no-deps identity >/dev/null 2>&1; then
+    out=$(docker compose run --rm --no-deps -e SYNTHWERK_STUDIO_URL=http://studio:3000 zitadel-bootstrap builder-check 2>&1 || true)
+  else
+    out="identity did not start with the Zitadel issuer (project '${sproject:-none}')"
+  fi
+  if docker compose up -d --wait --no-deps identity >/dev/null 2>&1; then pass "identity back on its own settings after the builder check"; else fail "identity did not come back after the builder check"; fi
+  bstatus=$(grep '"builder-check: studio session' <<<"$out" | grep -o '"builder_status":[0-9]*' | cut -d: -f2 | head -n 1 || true)
+  bcode=$(grep '"builder-check: studio session' <<<"$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4 | head -n 1 || true)
+  if [[ "$out" == *'"msg":"builder-check ok"'* ]]; then
+    pass "builder with a valid owner session: $bstatus${bcode:+ $bcode} (not 503)"
+  else
+    fail "builder-check: $(grep -o '"err":"[^"]*"' <<<"$out" | head -n 1 || echo "${out:0:160}") status '${bstatus:-none}' code '${bcode:-none}'"
+  fi
+  # Studio migrates on the first builder call that passes the identity check.
+  if [[ "$bstatus" == 200 ]]; then
+    tables=$(docker compose exec -T database psql -U "${SYNTHWERK_POSTGRES_USER:-synthwerk}" -d studio -tAc \
+      "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tableowner = 'studio' AND tablename IN ('builder_pages', 'builder_page_versions', 'builder_events')" 2>/dev/null | tr -d '\r' || true)
+    if [[ "$tables" == 3 ]]; then pass "studio migrated its database: 3 builder tables owned by studio"; else fail "builder tables in database studio: '${tables:-none}'"; fi
+  else
+    echo "info: identity did not confirm the owner (status ${bstatus:-none}), so studio ran no migration yet"
+  fi
 else
   echo "skip: studio is not running (docker compose --profile studio up --build --wait)"
+fi
+
+echo "# mascot: public answers with sources, per-client rate limit, no egress (synthwerk#48)"
+MASCOT="$EDGE/mascot"
+expect_status "mascot /healthz on the edge" 200 "$MASCOT/healthz"
+mready=$(curl -s --max-time 10 "$MASCOT/readyz" || true)
+if [[ "$mready" == *'"name":"model","status":"ok"'* && "$mready" == *'"name":"index","status":"ok"'* ]]; then pass "mascot /readyz: model and index ok"; else fail "mascot /readyz: ${mready:0:200}"; fi
+expect_status "mascot routes other than answers and health are not on the edge" 404 "$MASCOT/openapi.json"
+# ask <question>: POST /mascot/v1/answers through the edge; prints the body, then the status.
+ask() {
+  curl -s --max-time 30 -X POST -H 'Content-Type: application/json' \
+    --data "{\"question\":\"$1\"}" -w '\n%{http_code}' "$MASCOT/v1/answers" || true
+}
+asked=0
+for q in "Welcher Anbieter verschickt E-Mails?" "Which email provider sends the invites?"; do
+  out=$(ask "$q")
+  asked=$((asked + 1))
+  if [[ "${out##*$'\n'}" == 200 && "$out" == *'"found":true'* && "$out" == *'"path":"docs/infrastructure.md"'* \
+    && "$out" == *'"url":"https://github.com/VelimirMueller/synthwerk/blob/'* ]]; then
+    pass "mascot answers '$q' with a cited passage of docs/infrastructure.md"
+  else
+    fail "mascot answer to '$q': ${out:0:240}"
+  fi
+done
+# The mascot allows 6 questions per client a minute. The edge sets X-Forwarded-For to the
+# client address and the mascot trusts it from the edge only: the 7th question gets 429.
+codes=""
+while ((asked < 6)); do
+  codes+="$(ask "Was ist Synthwerk?" | tail -n 1) "
+  asked=$((asked + 1))
+done
+headers=$(curl -s -o /dev/null -D - --max-time 30 -X POST -H 'Content-Type: application/json' \
+  --data '{"question":"Was ist Synthwerk?"}' "$MASCOT/v1/answers" | tr -d '\r' || true)
+code7=$(head -n 1 <<<"$headers" | awk '{print $2}')
+if [[ "$codes" == "200 200 200 200 " && "$code7" == 429 ]] && grep -qi '^retry-after: [0-9]' <<<"$headers"; then
+  pass "questions 1-6 from one client: 200; the 7th in the minute: 429 with Retry-After"
+else
+  fail "mascot rate limit: questions 3-6 '$codes', 7th '$code7'"
+fi
+# A forged X-Forwarded-For does not make a new client: the edge drops it.
+expect_status "7th question with a forged X-Forwarded-For: still 429" 429 -X POST -H 'Content-Type: application/json' \
+  -H 'X-Forwarded-For: 198.51.100.7' --data '{"question":"Was ist Synthwerk?"}' "$MASCOT/v1/answers"
+# Another client (a container on the edge network) still gets an answer: the limit counts
+# real client addresses, not the edge address.
+edge_net=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$(docker compose ps -q edge)" | grep '_edge$' || true)
+code=$(docker run --rm --network "$edge_net" curlimages/curl:8.17.0 -s -o /dev/null -w '%{http_code}' --max-time 30 \
+  -X POST -H 'Content-Type: application/json' --data '{"question":"Was ist Synthwerk?"}' http://edge:8000/mascot/v1/answers 2>/dev/null || true)
+if [[ "$code" == 200 ]]; then pass "a second client gets 200 while the first is limited"; else fail "second client: '$code' (want 200)"; fi
+
+echo "# mascot CORS: the public site origins only"
+# mascot_cors <origin>: the Access-Control-Allow-Origin of a preflight on /v1/answers, or empty.
+mascot_cors() {
+  curl -s -o /dev/null -D - --max-time 10 -X OPTIONS -H "Origin: $1" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type' "$MASCOT/v1/answers" \
+    | tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" { print $2 }'
+}
+site=$(setting SYNTHWERK_MASCOT_CORS_ORIGINS '["http://localhost:3000","http://localhost:3001"]' | grep -oE 'https?://[^"]+' | tail -n 1)
+if [[ -n "$site" && "$(mascot_cors "$site")" == "$site" ]]; then pass "mascot preflight from the public site $site: allowed"; else fail "mascot preflight from '$site' has no allow-origin"; fi
+if [[ -z "$(mascot_cors https://evil.example)" ]]; then pass "mascot preflight from a foreign origin: no allow-origin"; else fail "mascot allows a foreign origin"; fi
+
+echo "# mascot isolation: no route out, only the edge on its network"
+mascot_id=$(docker compose ps -q mascot)
+mascot_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$mascot_id" | grep . || true)
+if [[ "$mascot_nets" == *_mascot && $(grep -c . <<<"$mascot_nets") == 1 ]]; then pass "mascot is on one network: $mascot_nets"; else fail "mascot networks: $(tr '\n' ' ' <<<"$mascot_nets")"; fi
+internal=$(docker network inspect -f '{{.Internal}}' "$mascot_nets" 2>/dev/null || true)
+if [[ "$internal" == true ]]; then pass "network $mascot_nets is internal"; else fail "network $mascot_nets internal: '$internal'"; fi
+members=$(docker network inspect -f '{{range .Containers}}{{println .Name}}{{end}}' "$mascot_nets" 2>/dev/null | grep . | sed -E 's/^.*-(edge|mascot)-[0-9]+$/\1/' | sort | tr '\n' ' ' || true)
+if [[ "$members" == "edge mascot " ]]; then pass "only the edge and the mascot are on $mascot_nets"; else fail "members of $mascot_nets: '$members'"; fi
+# From inside the container: no default route, no DNS for outside or stack names, no TCP out.
+# The edge (172.31.251.2:8000) is the control: the same probe must reach it.
+probe=$(docker compose exec -T mascot python -c '
+import socket
+def dns(h):
+    try:
+        socket.getaddrinfo(h, 443)
+        return "resolved"
+    except OSError:
+        return "fail"
+def tcp(ip, port):
+    s = socket.socket()
+    s.settimeout(3)
+    try:
+        s.connect((ip, port))
+        return "connected"
+    except OSError:
+        return "fail"
+    finally:
+        s.close()
+routes = [l.split()[1] for l in open("/proc/net/route").read().splitlines()[1:]]
+print("route default", "yes" if "00000000" in routes else "no")
+for h in ("example.com", "github.com", "database", "bus", "telemetry", "identity"):
+    print("dns", h, dns(h))
+for ip, port in (("1.1.1.1", 443), ("8.8.8.8", 53), ("140.82.112.3", 443), ("172.31.251.1", 80)):
+    print("tcp", ip, port, tcp(ip, port))
+print("tcp edge", tcp("172.31.251.2", 8000))
+' 2>&1 | tr -d '\r' || true)
+if grep -qx 'route default no' <<<"$probe"; then pass "mascot has no default route"; else fail "mascot routes: $(grep '^route' <<<"$probe" || echo "${probe:0:200}")"; fi
+if grep -qx 'tcp edge connected' <<<"$probe"; then pass "control: the probe reaches the edge"; else fail "probe cannot reach the edge: ${probe:0:200}"; fi
+leaks=$(grep -E '^(dns .* resolved|tcp [0-9.]+ [0-9]+ connected)$' <<<"$probe" || true)
+dns_checked=$(grep -c '^dns ' <<<"$probe" || true)
+tcp_checked=$(grep -cE '^tcp [0-9.]+ [0-9]+ ' <<<"$probe" || true)
+if [[ -z "$leaks" && "$dns_checked" == 6 && "$tcp_checked" == 4 ]]; then
+  pass "mascot cannot resolve outside or stack names (6) and cannot connect out (4 addresses)"
+else
+  fail "mascot egress: ${leaks:-checks dns=$dns_checked tcp=$tcp_checked} ${probe:0:200}"
 fi
 
 echo "# benign requests pass the WAF"
