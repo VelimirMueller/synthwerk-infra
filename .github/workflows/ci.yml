@@ -122,6 +122,7 @@ jobs:
           tests/stack/issuer.sh setup
           docker compose config --quiet
           docker compose --profile ollama config --quiet
+          docker compose --profile studio config --quiet
       - name: Run the stack test against the whole compose stack
         run: tests/stack/e2e.sh
 

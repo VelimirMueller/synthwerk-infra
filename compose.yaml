@@ -1,11 +1,13 @@
 # Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
-# identity and llm.
+# identity and llm; studio with a profile.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
 #   docker compose --profile ollama up --wait   # also start Ollama
+#   docker compose --profile studio up --build --wait   # also build and start studio
 #
-# Every image is pinned by tag and digest. Renovate bumps both.
+# Every image is pinned by tag and digest. Renovate bumps both. Studio has no
+# image yet: the profile builds it from a checkout (studio/Dockerfile).
 name: synthwerk
 
 x-hardening: &hardening
@@ -104,6 +106,16 @@ services:
       SYNTHWERK_PULSE_DATABASE_URL: postgres://${SYNTHWERK_POSTGRES_USER:-synthwerk}:${SYNTHWERK_POSTGRES_PASSWORD:?run scripts/init-env.sh to write .env}@database:5432/${SYNTHWERK_POSTGRES_DB:-synthwerk}?sslmode=disable
       SYNTHWERK_PULSE_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
       SYNTHWERK_PULSE_TARGETS_FILE: /etc/pulse/targets.yaml
+      # Token check on every /v1 route (synthwerk#40; images from synthwerk-pulse 984d77e on).
+      # Like identity and llm: Zitadel by default; the stack test points these at its
+      # own issuer (tests/stack/issuer.sh). Older images ignore them.
+      SYNTHWERK_PULSE_OIDC_ISSUER: ${SYNTHWERK_PULSE_OIDC_ISSUER:-http://auth.localhost:8080}
+      SYNTHWERK_PULSE_OIDC_AUDIENCE: ${SYNTHWERK_PULSE_OIDC_AUDIENCE:-synthwerk-api}
+      SYNTHWERK_PULSE_JWKS_URL: ${SYNTHWERK_PULSE_JWKS_URL:-}
+      # Zitadel org that grants operator. Empty = nobody is operator in pulse.
+      SYNTHWERK_PULSE_PLATFORM_ORG_ID: ${SYNTHWERK_PULSE_PLATFORM_ORG_ID:-}
+      # Edge rates, error share and p95 per service (traefik_service_* in Prometheus).
+      SYNTHWERK_PULSE_PROMETHEUS_URL: http://telemetry:9090
     volumes:
       - ./compose/pulse/targets.yaml:/etc/pulse/targets.yaml:ro
     networks: [app, data]
@@ -249,7 +261,15 @@ services:
     volumes:
       - zitadel-bootstrap:/zitadel/bootstrap
       - zitadel-admin:/zitadel/admin
-    networks: [app, data, zitadel-hooks]
+    networks:
+      # The alias lets services inside the stack fetch the issuer URL
+      # (http://auth.localhost:8080: discovery, keys, token exchange). It matches only
+      # while the external port is 8080, Zitadel's own port. Another edge port
+      # (SYNTHWERK_EDGE_HTTP_PORT) gives an issuer no container can reach.
+      app:
+        aliases: ["${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}"]
+      data: {}
+      zitadel-hooks: {}
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -306,8 +326,11 @@ services:
       SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
       SYNTHWERK_ZITADEL_URL: http://zitadel:8080
       SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN: ${SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN:-auth.localhost}
-      SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS:-http://localhost:3000/api/auth/callback}
-      SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS:-http://localhost:3000/}
+      # :3000 = studio with pnpm dev, :3001 = studio in this stack (profile studio).
+      SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS:-http://localhost:3000/api/auth/callback,http://localhost:3001/api/auth/callback}
+      SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS: ${SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS:-http://localhost:3000/,http://localhost:3001/}
+      # Copy of studio-client.json for the studio container (owner 65532, mode 0400).
+      SYNTHWERK_ZITADEL_STUDIO_SHARE_FILE: /zitadel/studio/studio-client.json
       SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME: ${SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME:-300s}
       # Local and ci only: empty on dev and prd, so no test user exists there.
       SYNTHWERK_ZITADEL_TEST_USER_PASSWORD: ${SYNTHWERK_ZITADEL_TEST_USER_PASSWORD:-}
@@ -327,6 +350,7 @@ services:
       - zitadel-admin:/zitadel/admin
       - zitadel-bootstrap:/zitadel/bootstrap:ro
       - zitadel-hooks:/zitadel/hooks
+      - studio-client:/zitadel/studio
     networks: [app]
     depends_on:
       zitadel:
@@ -356,6 +380,28 @@ services:
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/mailpit", "readyz"]
+
+  # One-shot: the ES256 key identity signs widget tokens with (synthwerk#30). Made
+  # once per volume, at the first start; never in git. identity reads it at start.
+  identity-widget-key:
+    # Same image as zitadel-bootstrap (subcommand widget-key); the second build hits the cache.
+    build:
+      context: .
+      dockerfile: zitadel/Dockerfile
+    image: synthwerk-zitadel-bootstrap:local
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    # CHOWN: the key file belongs to identity's nonroot user (65532).
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    command: ["widget-key"]
+    environment:
+      SYNTHWERK_IDENTITY_WIDGET_SIGNING_KEY_FILE: /keys/widget-signing.key
+    volumes:
+      - identity-keys:/keys
+    network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
   # Image from synthwerk-identity main 9fba3fd (orgs and roles, synthwerk#29), pinned by digest.
@@ -392,8 +438,16 @@ services:
       SYNTHWERK_IDENTITY_ZITADEL_PAT_FILE: /zitadel/hooks/identity.pat
       # org.created and member.role_changed go from the outbox to EVT_IDENTITY.
       SYNTHWERK_IDENTITY_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
+      # Widget tokens (synthwerk#30): ES256 key from identity-widget-key, issuer = the
+      # public URL of identity on the edge. Key set: GET /identity/.well-known/jwks.json.
+      # Older images ignore these.
+      SYNTHWERK_IDENTITY_WIDGET_SIGNING_KEY_FILE: /keys/widget-signing.key
+      SYNTHWERK_IDENTITY_WIDGET_ISSUER: ${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}
+      # Own-data export (synthwerk#41): identity asks llm for its part of GET /v1/me/export.
+      SYNTHWERK_IDENTITY_EXPORT_SOURCES: llm=http://llm:8080
     volumes:
       - zitadel-hooks:/zitadel/hooks:ro
+      - identity-keys:/keys:ro
     networks:
       app: {}
       data: {}
@@ -404,6 +458,8 @@ services:
         ipv4_address: 172.31.250.10
     depends_on:
       database-init:
+        condition: service_completed_successfully
+      identity-widget-key:
         condition: service_completed_successfully
       bus:
         condition: service_healthy
@@ -443,6 +499,60 @@ services:
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/llm", "healthcheck"]
+
+  # synthwerk-studio (Nuxt BFF): sign-in, health view, apps, users and audit
+  # (synthwerk#37, #38, #40, #95). Profile "studio": synthwerk-studio publishes no image
+  # yet, so compose builds a checkout (SYNTHWERK_STUDIO_SRC, default ../synthwerk-studio).
+  # Open http://localhost:3001 (SYNTHWERK_STUDIO_PORT); Grafana keeps :3000.
+  # Sign-in needs the default edge port 8080: the server calls the issuer URL
+  # (see the alias on zitadel).
+  studio:
+    <<: *hardening
+    profiles: [studio]
+    build:
+      context: ./studio
+      additional_contexts:
+        src: ${SYNTHWERK_STUDIO_SRC:-../synthwerk-studio}
+    image: synthwerk-studio:local
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs: [/tmp]
+    environment:
+      # Client id, secret and project id come from the bootstrap file (studio/start.mjs).
+      STUDIO_CLIENT_FILE: /studio/studio-client.json
+      NUXT_OIDC_ISSUER: ${SYNTHWERK_ZITADEL_PUBLIC_URL:-http://auth.localhost:8080}
+      NUXT_OIDC_REDIRECT_URI: http://localhost:${SYNTHWERK_STUDIO_PORT:-3001}/api/auth/callback
+      NUXT_OIDC_POST_LOGOUT_REDIRECT_URI: http://localhost:${SYNTHWERK_STUDIO_PORT:-3001}/
+      # Same switch as the server-side gate: studio refuses tokens without mfa only
+      # when Zitadel puts amr into them (synthwerk#94).
+      NUXT_OIDC_REQUIRE_MFA: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
+      # Not required here: a stale .env must not break "up" without the profile. Empty =
+      # studio answers 500 (NUXT_SESSION_SECRET must be set) and stays unhealthy;
+      # scripts/init-env.sh appends a generated value.
+      NUXT_SESSION_SECRET: ${SYNTHWERK_STUDIO_SESSION_SECRET:-}
+      # Server side, inside the stack: identity and pulse directly, not through the edge.
+      NUXT_IDENTITY_URL: http://identity:8080
+      NUXT_PULSE_BASE_URL: http://pulse:8080
+      # The embed snippet: where the widget script is served (synthwerk-widgets dev
+      # server by default) and the edge the widget calls.
+      NUXT_PUBLIC_WIDGET_SCRIPT_URL: ${SYNTHWERK_STUDIO_WIDGET_SCRIPT_URL:-http://localhost:4174/dist/synthwerk-chat.js}
+      NUXT_PUBLIC_WIDGET_API_URL: http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}
+    volumes:
+      - studio-client:/studio:ro
+    ports:
+      - "127.0.0.1:${SYNTHWERK_STUDIO_PORT:-3001}:3000"
+    # "edge" for the published port; "app" for Zitadel, identity and pulse.
+    networks: [edge, app]
+    depends_on:
+      zitadel-bootstrap:
+        condition: service_completed_successfully
+      identity:
+        condition: service_healthy
+      pulse:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "node", "/app/start.mjs", "healthcheck"]
 
   # Telemetry: grafana/otel-lgtm (OTel Collector, Grafana, Loki, Tempo, Prometheus).
   # D-36: all-in-one until M3, then SigNoz. OTLP on 4317 (gRPC) and 4318 (HTTP).
@@ -525,3 +635,7 @@ volumes:
   # Signing key of the identity Action target and the identity-sync PAT (synthwerk#29).
   # zitadel-bootstrap writes, identity reads.
   zitadel-hooks: {}
+  # Widget token signing key (synthwerk#30). identity-widget-key writes, identity reads.
+  identity-keys: {}
+  # Studio OIDC client (id and secret). zitadel-bootstrap writes, studio reads.
+  studio-client: {}

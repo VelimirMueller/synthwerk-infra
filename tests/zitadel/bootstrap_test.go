@@ -2,7 +2,11 @@ package zitadel_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -42,6 +46,7 @@ type fake struct {
 	smtp     map[string]map[string]any // id -> provider
 	members  map[string][]string       // instance member user id -> roles
 	gmembers map[string][]string       // project grant id/user id -> roles
+	omembers map[string][]string       // org id/user id -> org roles
 	pats     map[string]string         // user id/token id of live PATs -> expiration date
 	patN     int
 	// notChanged answers every PUT with Zitadel's "not changed" error.
@@ -57,7 +62,7 @@ func newFake() *fake {
 		users: map[string]string{}, ugrants: map[string][]string{},
 		targets: map[string]map[string]any{}, execs: map[string][]string{}, conds: map[string]any{},
 		smtp: map[string]map[string]any{}, members: map[string][]string{},
-		gmembers: map[string][]string{}, pats: map[string]string{},
+		gmembers: map[string][]string{}, omembers: map[string][]string{}, pats: map[string]string{},
 		policies: map[string]map[string]any{
 			"/admin/v1/policies/login": {"allowRegister": true, "allowExternalIdp": true, "forceMfa": false,
 				"secondFactors": []any{"SECOND_FACTOR_TYPE_OTP"}, "passwordCheckLifetime": "864000s"},
@@ -176,6 +181,18 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(f.members, uid)
+		reply(map[string]any{})
+	case p == "/management/v1/orgs/me/members" && r.Method == http.MethodPost:
+		uid := in["userId"].(string)
+		if f.omembers[org+"/"+uid] != nil {
+			w.WriteHeader(http.StatusConflict)
+			reply(map[string]any{"code": 6, "message": "Errors.Org.Member.AlreadyExists"})
+			return
+		}
+		f.omembers[org+"/"+uid] = strSlice(in["roles"])
+		reply(map[string]any{})
+	case strings.HasPrefix(p, "/management/v1/orgs/me/members/") && r.Method == http.MethodPut:
+		f.omembers[org+"/"+strings.TrimPrefix(p, "/management/v1/orgs/me/members/")] = strSlice(in["roles"])
 		reply(map[string]any{})
 	case reGrantMember.MatchString(p):
 		m := reGrantMember.FindStringSubmatch(p)
@@ -601,6 +618,12 @@ func TestIdentitySyncUserGetsOnePAT(t *testing.T) {
 	if got := f.gmembers[r.DemoGrantID+"/"+id]; !slices.Equal(got, bootstrap.IdentitySyncGrantRoles) {
 		t.Errorf("roles on the demo project grant %v, want %v", got, bootstrap.IdentitySyncGrantRoles)
 	}
+	if got := f.omembers[r.DemoOrgID+"/"+id]; !slices.Equal(got, bootstrap.IdentitySyncOrgRoles) {
+		t.Errorf("roles in the demo org %v, want %v", got, bootstrap.IdentitySyncOrgRoles)
+	}
+	if got := f.omembers[r.PlatformOrgID+"/"+id]; got != nil {
+		t.Errorf("identity-sync has roles %v in the platform org, want none", got)
+	}
 	pat, err := os.ReadFile(cfg.IdentityPATFile)
 	if err != nil || string(pat) != "pat-1" {
 		t.Fatalf("pat file %q, %v", pat, err)
@@ -965,5 +988,74 @@ func TestHasMFA(t *testing.T) {
 		if got := bootstrap.HasMFA(c.claims); got != c.want {
 			t.Errorf("%v: %v, want %v", c.claims, got, c.want)
 		}
+	}
+}
+
+func TestIdentitySyncOrgRoleIsSetOnce(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	r := run(t, c, cfg)
+	id := f.users["o-platform/"+bootstrap.IdentitySyncUser]
+	f.calls = nil
+	run(t, c, cfg)
+	// The second run finds the member (409) and puts the same roles back.
+	if got := f.omembers[r.DemoOrgID+"/"+id]; !slices.Equal(got, bootstrap.IdentitySyncOrgRoles) {
+		t.Errorf("roles after the second run %v, want %v", got, bootstrap.IdentitySyncOrgRoles)
+	}
+}
+
+func TestIdentitySyncOrgRoleRefusesThePlatformOrg(t *testing.T) {
+	_, c, _ := hookSetup(t)
+	for _, org := range []string{"o-platform", ""} {
+		if err := bootstrap.GrantIdentitySyncOrg(context.Background(), c, "o-platform", org, "m-1"); err == nil {
+			t.Errorf("org %q: want an error", org)
+		}
+	}
+}
+
+func TestStudioClientIsSharedWithStudio(t *testing.T) {
+	_, c, cfg := setup(t, map[string]string{})
+	cfg.StudioShareFile = filepath.Join(t.TempDir(), "studio-client.json")
+	cfg.StudioShareOwner = os.Getuid()
+	run(t, c, cfg)
+	want, err := os.ReadFile(cfg.StudioClientFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(cfg.StudioShareFile)
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("shared file %q, %v; want the client file", got, err)
+	}
+	if st, _ := os.Stat(cfg.StudioShareFile); st.Mode().Perm() != 0o400 {
+		t.Errorf("shared file mode %v, want 0400", st.Mode().Perm())
+	}
+	run(t, c, cfg) // a rerun replaces the 0400 file without error
+}
+
+func TestWidgetKeyIsMadeOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "widget-signing.key")
+	made, err := bootstrap.EnsureWidgetKey(path, os.Getuid())
+	if err != nil || !made {
+		t.Fatalf("first call: made %v, err %v", made, err)
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: the test's own temp file
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		t.Fatalf("not a PKCS #8 PEM block")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if ec, ok := key.(*ecdsa.PrivateKey); err != nil || !ok || ec.Curve != elliptic.P256() {
+		t.Fatalf("key is not ECDSA P-256: %T, %v", key, err)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o400 {
+		t.Errorf("key mode %v, want 0400", st.Mode().Perm())
+	}
+	if made, err := bootstrap.EnsureWidgetKey(path, os.Getuid()); err != nil || made {
+		t.Errorf("second call: made %v, err %v; want the old key kept", made, err)
+	}
+	if again, _ := os.ReadFile(path); string(again) != string(raw) { //nolint:gosec // G304: the test's own temp file
+		t.Error("second call changed the key")
 	}
 }

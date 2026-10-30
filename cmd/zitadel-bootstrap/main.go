@@ -28,8 +28,17 @@ func main() {
 		"deployment.environment.name", os.Getenv("SYNTHWERK_PLATFORM_ENV"),
 	)
 	run := apply
-	if len(os.Args) > 1 && os.Args[1] == "selftest" {
-		run = selftest
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "selftest":
+			run = selftest
+		case "widget-key":
+			run = widgetKey
+		default:
+			// Never fall back to the full bootstrap on a typo.
+			log.Error("unknown subcommand: want selftest or widget-key", "arg", os.Args[1])
+			os.Exit(2)
+		}
 	}
 	if err := withTimeout(run, log); err != nil {
 		log.Error("zitadel bootstrap failed", "err", err)
@@ -79,6 +88,20 @@ func apply(ctx context.Context, log *slog.Logger) error {
 		"platform_org_id", r.PlatformOrgID, "demo_org_id", r.DemoOrgID,
 		"project_id", r.ProjectID, "studio_client_id", r.StudioClientID,
 		"test_users", len(r.TestUserIDs))
+	return nil
+}
+
+// widgetKey writes the widget token signing key of identity when it is missing
+// (synthwerk#30). It needs no Zitadel: the one-shot identity-widget-key runs it
+// before identity starts, because identity reads the key once at start.
+func widgetKey(_ context.Context, log *slog.Logger) error {
+	path := or(os.Getenv("SYNTHWERK_IDENTITY_WIDGET_SIGNING_KEY_FILE"), "/keys/widget-signing.key")
+	// 65532: nonroot in the distroless image of synthwerk-identity.
+	made, err := bootstrap.EnsureWidgetKey(path, 65532)
+	if err != nil {
+		return err
+	}
+	log.Info("widget key ready", "path", path, "created", made)
 	return nil
 }
 
@@ -134,7 +157,11 @@ func selftest(ctx context.Context, log *slog.Logger) error {
 				return fmt.Errorf("%s: %w", u.UserName, err)
 			}
 		}
-		log.Info("selftest ok", "user", u.UserName, "org_id", orgID, "roles", u.Roles, "amr", claims["amr"], "mfa_gate", cfg.MFAGate)
+		// sid or auth_time bind an account delete to the sign-in (synthwerk#41). Presence only, never the value.
+		_, sid := claims["sid"]
+		_, authTime := claims["auth_time"]
+		log.Info("selftest ok", "user", u.UserName, "org_id", orgID, "roles", u.Roles, "amr", claims["amr"], "mfa_gate", cfg.MFAGate,
+			"has_sid", sid, "has_auth_time", authTime)
 	}
 	return nil
 }

@@ -23,6 +23,16 @@ http:
       middlewares: [edge-cors, edge-secure, strip-service-prefix]
       service: identity
 
+    # identity widget routes (synthwerk#30, #38): the chat widget calls them from
+    # customer sites. identity answers CORS per app from its origin allow-list, so
+    # edge-cors (SYNTHWERK_CORS_ORIGINS only) must not answer the preflight here.
+    # The WAF, rate limit and body limit stay. The longer rule wins over "identity".
+    identity-widget:
+      rule: PathRegexp(`^/identity/v1/apps/[^/]+/widget-(settings|tokens)$`)
+      entryPoints: [web]
+      middlewares: [edge-secure, strip-service-prefix]
+      service: identity
+
     # llm: the chat answer is a long-lived SSE response, so the chain is the
     # stream chain (no "buffering"), like pulse. The WAF still checks every request.
     llm:

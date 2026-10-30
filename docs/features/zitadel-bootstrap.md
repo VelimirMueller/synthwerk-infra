@@ -8,7 +8,7 @@ paths: ["zitadel/**", "cmd/zitadel-bootstrap/**", "compose.yaml", "tests/zitadel
 api: []
 events: []
 mcp: []
-updated: 2026-10-29
+updated: 2026-10-30
 ---
 
 # Zitadel setup as code
@@ -25,6 +25,7 @@ updated: 2026-10-29
 - Grants the project to `demo` with `admin`, `member` and `end_user`.
 - Creates the OIDC app `studio`: web, code and refresh grants, client secret (Basic), JWT access token, roles in the access and ID token.
 - Writes the studio client id and secret to `studio-client.json` (mode 0600) in the volume `zitadel-admin`. Without the file, the next run makes a new secret.
+- With `SYNTHWERK_ZITADEL_STUDIO_SHARE_FILE`: copies that file for the studio container (mode 0400, owner 65532), on every run. Compose puts it in the volume `studio-client`, which only the bootstrap and studio mount.
 - Sets the instance login policy: MFA required (D-47), passkeys allowed, no self-registration (D-51), no hint about unknown user names.
 - Sets the password policy: 12 characters minimum with upper, lower, digit and symbol, lockout after 5 tries.
 - Sets the access token lifetime to 300 s.
@@ -33,13 +34,14 @@ updated: 2026-10-29
 - Creates the test users `operator.test` (platform, `operator`), `owner.demo` (demo, `owner`) and `member.demo` (demo, `member`), only when `SYNTHWERK_ZITADEL_TEST_USER_PASSWORD` is set.
 - The demo org may grant `owner`, `admin`, `member` and `end_user` (synthwerk#29).
 - With `SYNTHWERK_ZITADEL_MFA_GATE=true` (synthwerk#94, [ADR-0004](../adr/0004-mfa-is-enforced-on-the-server-by-a-request-execution.md)): the call targets `identity-mfa-gate` (interrupt on error) and `identity-token-claims` (no interrupt) on identity's hook listener, a request execution per sign-in call (`bootstrap.GatedMethods`) and the function execution `preaccesstoken`. Their keys go to `identity-mfa-gate.key` and `identity-token-claims.key` (mode 0400, owner 65532). With `false` the bootstrap points these executions at no target.
-- With the identity hook: Action executions for `user.human.added` and the user grant events (`user.grant.added|changed|removed|cascade.removed`), and the machine user `identity-sync` with `PROJECT_GRANT_OWNER` on the demo project grant, no instance role (ADR-0003). Its PAT (30 days, `SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME`) goes to `/zitadel/hooks/identity.pat` (mode 0400, owner 65532), its id to `identity.pat.id` (0444, no secret). A run mints a new PAT when a file is missing or the PAT has less than a third of its lifetime left. Every run revokes all other PATs of `identity-sync` (all search pages). A failed file write deletes the new PAT again. identity writes role changes to user grants with it.
+- With the identity hook: Action executions for `user.human.added` and the user grant events (`user.grant.added|changed|removed|cascade.removed`), and the machine user `identity-sync` with `PROJECT_GRANT_OWNER` on the demo project grant and `ORG_USER_MANAGER` in the demo org, no instance role and no role in the platform org (ADR-0003, [ADR-0005](../adr/0005-identity-sync-manages-users-in-customer-orgs.md)). `ORG_USER_MANAGER` lets identity invite users (synthwerk#37) and delete the Zitadel user of a deleted account (synthwerk#41).
+- Subcommand `widget-key` (one-shot `identity-widget-key`): writes an ECDSA P-256 key (PKCS #8 PEM, mode 0400, owner 65532) for identity's widget tokens when the file is missing (synthwerk#30). It needs no Zitadel. Its PAT (30 days, `SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME`) goes to `/zitadel/hooks/identity.pat` (mode 0400, owner 65532), its id to `identity.pat.id` (0444, no secret). A run mints a new PAT when a file is missing or the PAT has less than a third of its lifetime left. Every run revokes all other PATs of `identity-sync` (all search pages). A failed file write deletes the new PAT again. identity writes role changes to user grants with it.
 
 ## How to use
 
 1. Run `docker compose up --wait`. The bootstrap runs after Zitadel is healthy.
 2. Read the result: `docker compose logs zitadel-bootstrap`. The last line lists the org, project and client ids.
-3. Check sign-in and claims: `docker compose run --rm --no-deps zitadel-bootstrap selftest`. With the MFA gate on, it first proves that a password-only sign-in gets no token, then enrols a new TOTP for each test user and signs in with password and TOTP; the token must have `amr` with `mfa`.
+3. Check sign-in and claims: `docker compose run --rm --no-deps zitadel-bootstrap selftest`. Its log also says whether the access token has `sid` and `auth_time` (names only). With the MFA gate on, it first proves that a password-only sign-in gets no token, then enrols a new TOTP for each test user and signs in with password and TOTP; the token must have `amr` with `mfa`.
 4. Change a setting in `zitadel/bootstrap/bootstrap.go`, then `docker compose up --build zitadel-bootstrap`.
 
 ## Rules and limits
@@ -63,6 +65,9 @@ updated: 2026-10-29
 | `::ffff:0:0/96` | Left out of the deny list: in v4.20.0 it matches every IPv4 address, so no IPv4 target works with it. The IPv4 CIDRs still block mapped literals such as `[::ffff:127.0.0.1]` (measured 2026-10-23). |
 | Action caching | Zitadel caches executions and targets: a changed execution or endpoint takes some seconds to apply. Users made in the first seconds after the bootstrap can miss the hook (seen in CI-like runs: 1 of 2 test users). Invites come later, so dev and prd are not affected. |
 | Order | The bootstrap waits for identity: Zitadel resolves the target name when it saves the target. |
+| `sid` and `auth_time` | Zitadel v4.20.0 access tokens carry neither (selftest, 2026-10-30, gate on and off). The pre-access-token function sees no session. So identity's account delete (synthwerk#41), which binds the recent MFA to `sid` or `auth_time`, refuses every Zitadel token with 403 `recent_mfa_required`. No instance setting changes this; the fix belongs in synthwerk-identity. |
+| New customer orgs | Whoever creates one grants `identity-sync` both `PROJECT_GRANT_OWNER` on the project grant and `ORG_USER_MANAGER` in the org (`GrantIdentitySync`, `GrantIdentitySyncOrg`). |
+| Grant deactivate and reactivate events | Not sent to identity: synthwerk-identity (fe9b50f) ignores `user.grant.deactivated` and `user.grant.reactivated` (204). Its own deactivate and reactivate write the grant and the mirror together. |
 | Scope for org and roles | `openid profile urn:zitadel:iam:org:project:id:<project id>:aud urn:zitadel:iam:org:projects:roles urn:zitadel:iam:user:resourceowner` (`bootstrap.StudioScope`). |
 
 ## Events
@@ -92,6 +97,9 @@ updated: 2026-10-29
 - `tests/stack/stack_test.sh` — `org roles - member PATCH 403, owner PATCH 200, role_changed in the outbox and on EVT_IDENTITY, Zitadel grant changed`
 - `tests/zitadel/bootstrap_test.go` — `MFA gate - two call targets, one execution per sign-in call and preaccesstoken, keys 0400; second run changes nothing; gate off - executions cleared; bad switch value - error`
 - `tests/zitadel/bootstrap_test.go` — `TOTP - RFC 6238 vectors; HasMFA - amr with mfa only`
+- `tests/zitadel/bootstrap_test.go` — `identity-sync - ORG_USER_MANAGER in the demo org, none in the platform org, rerun keeps it; platform org or empty org - refused`
+- `tests/zitadel/bootstrap_test.go` — `studio client - copy for studio, mode 0400, rerun replaces it; widget key - P-256 PKCS #8, mode 0400, second call keeps it`
+- `tests/stack/stack_test.sh` — `identity-sync - ORG_USER_MANAGER in the demo org, no platform-org role; deletes a customer-org user 200, a platform-org user 403`
 - `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - all test users get org and role claims; zitadel-login - cannot read the admin PAT`
 
 ## Changes
@@ -103,3 +111,4 @@ updated: 2026-10-29
 | 2026-10-23 | Action target for identity, network `zitadel-hooks`, narrowed deny list (synthwerk#28 task 5). |
 | 2026-10-29 | MFA gate targets and executions behind `SYNTHWERK_ZITADEL_MFA_GATE`; selftest proves the gate (synthwerk#94). |
 | 2026-10-28 | Org roles: demo grant has `owner`, test user `owner.demo`, grant event executions, machine user `identity-sync` and its PAT (synthwerk#29). |
+| 2026-10-30 | `identity-sync` gets `ORG_USER_MANAGER` in customer orgs (ADR-0005); studio client copy for the studio container; `widget-key` subcommand; selftest logs `sid` and `auth_time` presence (synthwerk#30, #37, #41). |

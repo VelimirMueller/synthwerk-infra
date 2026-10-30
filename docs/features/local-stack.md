@@ -4,11 +4,11 @@ slug: local-stack
 status: beta
 epic: E1
 owner: infra
-paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "zitadel/**"]
+paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "zitadel/**", "studio/**"]
 api: []
 events: []
 mcp: []
-updated: 2026-10-29
+updated: 2026-10-30
 ---
 
 # Local stack
@@ -17,6 +17,7 @@ updated: 2026-10-29
 > - `docker compose up --wait` starts edge, WAF, bus, database, telemetry, pulse, Zitadel, Mailpit, identity and llm on one machine. Each has a health check.
 > - Zitadel is at `http://auth.localhost:8080`. identity and llm are at `/identity` and `/llm` on the edge, with CORS for the local frontends.
 > - Pulse streams the status of each part at `/pulse/v1/health/stream`. A stopped part shows as `down` within 30 s.
+> - `docker compose --profile studio up --build --wait` also builds and starts studio from a synthwerk-studio checkout, at `http://localhost:3001`.
 
 ## What it does
 
@@ -41,7 +42,13 @@ updated: 2026-10-29
 - Lets a chat prompt pass the WAF: only the JSON field `content` of `POST /llm/v1/conversations/<uuid>/messages` skips the CRS rules (rule 900230). The URI, query, headers and other fields are still checked.
 - Lets PATCH pass the WAF only on `/identity/v1/orgs/<uuid>/members/<user id>` (org role change, synthwerk#29, rule 900231). CRS still checks the body. Every other route allows GET, HEAD, POST and OPTIONS only.
 - identity checks tokens like llm (stack test: the local issuer), writes role changes to Zitadel as `identity-sync`, and publishes its outbox to `EVT_IDENTITY`.
-- `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm at it. Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
+- Gives identity an ES256 widget token key (synthwerk#30). The one-shot `identity-widget-key` makes it once per volume (`identity-keys`, owner 65532, mode 0400) before identity starts; it never leaves the volume. The issuer is `http://localhost:<edge port>/identity`; the key set is at `/identity/.well-known/jwks.json`.
+- Routes the widget routes `/identity/v1/apps/<id>/widget-settings` and `/widget-tokens` without `edge-cors`: the widget calls them from customer sites, and identity answers CORS per app from its origin allow-list (synthwerk#38). WAF, rate limit and body limit stay on.
+- Sets `SYNTHWERK_IDENTITY_EXPORT_SOURCES=llm=http://llm:8080`: the own-data export holds the llm part (synthwerk#41).
+- Gives pulse the token check (`SYNTHWERK_PULSE_OIDC_*`, `SYNTHWERK_PULSE_PLATFORM_ORG_ID`) and Prometheus in telemetry for the edge numbers (`SYNTHWERK_PULSE_PROMETHEUS_URL=http://telemetry:9090`, synthwerk#40). The edge exports `traefik_service_requests_total` and `traefik_service_request_duration_seconds_bucket` with the labels `service` (for example `llm@file`) and `code`.
+- Gives Zitadel the alias `auth.localhost` on the `app` network, so services in the stack reach the issuer URL (discovery, keys, token exchange). It works only with the default edge port 8080.
+- Profile `studio`: builds synthwerk-studio from a checkout (`SYNTHWERK_STUDIO_SRC`, default `../synthwerk-studio`; `studio/Dockerfile`) and runs it on `127.0.0.1:3001`. It reads the OIDC client from the volume `studio-client` (the bootstrap writes it, owner 65532, mode 0400) and calls identity and pulse inside the stack. The session secret is `SYNTHWERK_STUDIO_SESSION_SECRET`; `NUXT_OIDC_REQUIRE_MFA` follows `SYNTHWERK_ZITADEL_MFA_GATE`.
+- `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm, identity and pulse at it (pulse platform org `stack-platform`). Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
 
 ## How to use
 
@@ -51,6 +58,7 @@ updated: 2026-10-29
 2. Run `docker compose up --wait`.
 3. Run `tests/stack/stack_test.sh`.
 4. Open Grafana at `http://localhost:3000`.
+   For studio, run `docker compose --profile studio up --build --wait` and open `http://localhost:3001`. Sign-in needs the default edge port 8080.
 5. Watch the status: `curl -N http://127.0.0.1:8080/pulse/v1/health/stream`.
 6. Open Zitadel at `http://auth.localhost:8080`. Browsers and curl send `*.localhost` to 127.0.0.1.
    Mails from Zitadel (invites, verification) land in Mailpit at `http://127.0.0.1:8025` (D-49).
@@ -63,6 +71,10 @@ updated: 2026-10-29
 |---|---|
 | Edge port on the host | `127.0.0.1:8080` (`SYNTHWERK_EDGE_HTTP_PORT`) |
 | Telemetry ports on the host | `127.0.0.1:3000` UI, `4317` OTLP gRPC, `4318` OTLP HTTP |
+| Studio port on the host | `127.0.0.1:3001` (`SYNTHWERK_STUDIO_PORT`), profile `studio` only. Redirect URIs for `:3000` (pnpm dev) and `:3001` are in the bootstrap default. |
+| Other edge port | Set `SYNTHWERK_EDGE_HTTP_PORT`, `SYNTHWERK_ZITADEL_EXTERNAL_PORT` and `SYNTHWERK_ZITADEL_PUBLIC_URL` together (for example 18080), and export `SYNTHWERK_EDGE_HTTP_PORT` for the stack test. Containers then cannot reach the issuer URL: studio sign-in and Zitadel tokens in services need 8080. |
+| Widget key | Made once per volume; `docker compose down --volumes` makes a new key (widget tokens issued before fail). |
+| New images and older images | The pinned identity, llm and pulse images predate synthwerk#30, #38, #40 and #41. They ignore the new variables, and the stack test skips those checks with a `skip:` line. |
 | Bus and database ports on the host | none |
 | Networks | `edge` (published), `app`, `data` and `zitadel-hooks` (internal; `zitadel-hooks` = Zitadel and identity (`172.31.250.10`) only, subnet `172.31.250.0/28`), `models` (Ollama egress) |
 | Health check timeout in CI | 300 s |
@@ -100,6 +112,10 @@ updated: 2026-10-29
 - `tests/waf/waf_test.go` — `gRPC, gRPC-web, Connect proto on the gRPC host - 200; gRPC on another or a lookalike host - 403; unknown content type - 403; SQL injection in a gRPC-web query - 403; two Content-Type headers - 400`
 - `tests/stack/stack_test.sh` — `llm - no or forged token - 401, no message stored; signed-in send - 5 deltas spread over >= 900 ms through edge and WAF, then done; other user - 404; SQL and HTML in content - 200, in the query - 403; facts on EVT_LLM without text; logs without text`
 - `tests/waf/waf_test.go` — `chat prompt - SQL, HTML, shell in content - 200; same text in another field, the query, a header, another route or GET - 403`
+- `tests/stack/stack_test.sh` — `apps and widget - owner creates an app; widget settings and preflights from the app origin reach identity, foreign origin 403; widget token iss and origin; P-256 key set on the edge` (skipped with an older identity image)
+- `tests/stack/stack_test.sh` — `export - llm part, complete` and `llm consumer llm-user-deleted on EVT_IDENTITY` (skipped with older images)
+- `tests/stack/stack_test.sh` — `pulse - metrics 401 without a token, 403 as member, edge services from Prometheus as operator; stream with an operator token` (skipped with an older pulse image)
+- `tests/stack/stack_test.sh` — `studio - home 200, health and apps 401 without a session` (profile studio only)
 - `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` and the stack test
 
 ## Changes
@@ -115,3 +131,4 @@ updated: 2026-10-29
 | 2026-10-28 | llm streams chat answers: provider and token issuer from the env, WAF rule for prompts, `ollama-pull`, stack test with a local issuer (synthwerk#32). |
 | 2026-10-29 | Telemetry: collector overlay truncates client IPs in spans (#3). |
 | 2026-10-28 | Org roles: identity token check, Zitadel grant writes as `identity-sync`, relay to `EVT_IDENTITY`, PATCH on the member route through CORS and WAF (synthwerk#29). |
+| 2026-10-30 | Widget key and issuer, widget routes without edge CORS, export source llm, pulse token check and Prometheus, Zitadel issuer alias, studio profile (synthwerk#30, #37, #38, #40, #41). |

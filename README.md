@@ -74,6 +74,7 @@ scripts/init-env.sh                          # write .env with random dev passwo
 docker compose up --wait                     # start, wait for every health check
 tests/stack/stack_test.sh                    # health, WAF, limits, fail closed
 docker compose --profile ollama up --wait    # optional: local models
+docker compose --profile studio up --build --wait  # optional: studio from a ../synthwerk-studio checkout
 docker compose down --volumes                # stop and delete the data
 ```
 

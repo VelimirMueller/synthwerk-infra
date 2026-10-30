@@ -38,6 +38,12 @@ type Config struct {
 	StudioLogoutURIs   []string
 	// StudioClientFile receives the studio client id and secret (mode 0600).
 	StudioClientFile string
+	// StudioShareFile receives a copy of StudioClientFile for the studio container
+	// (mode 0400, owner StudioShareOwner) in a volume only studio and the bootstrap
+	// mount. Empty = no copy.
+	StudioShareFile string
+	// StudioShareOwner is the uid that owns StudioShareFile: studio runs as 65532.
+	StudioShareOwner int
 	// TestUserPassword creates the test users when not empty (local and ci only).
 	TestUserPassword string
 	// AccessTokenLifetime is the OIDC access token lifetime, for example "300s".
@@ -92,6 +98,8 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		StudioRedirectURIs:  list(getenv("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS"), "http://localhost:3000/api/auth/callback"),
 		StudioLogoutURIs:    list(getenv("SYNTHWERK_ZITADEL_STUDIO_LOGOUT_URIS"), "http://localhost:3000/"),
 		StudioClientFile:    or(getenv("SYNTHWERK_ZITADEL_STUDIO_CLIENT_FILE"), "/zitadel/admin/studio-client.json"),
+		StudioShareFile:     getenv("SYNTHWERK_ZITADEL_STUDIO_SHARE_FILE"),
+		StudioShareOwner:    65532,
 		TestUserPassword:    testPassword(getenv("SYNTHWERK_ZITADEL_TEST_USER_PASSWORD")),
 		AccessTokenLifetime: or(getenv("SYNTHWERK_ZITADEL_ACCESS_TOKEN_LIFETIME"), "300s"),
 		IdentityHookURL:     getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL"),
@@ -181,8 +189,10 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 		{"roles", func() error { return ensureRoles(ctx, c, r.ProjectID) }},
 		{"demo grant", func() (err error) { r.DemoGrantID, err = ensureGrant(ctx, c, r.ProjectID, r.DemoOrgID); return }},
 		{"studio app", func() (err error) {
-			r.StudioAppID, r.StudioClientID, err = ensureStudioApp(ctx, c, cfg, r.ProjectID)
-			return
+			if r.StudioAppID, r.StudioClientID, err = ensureStudioApp(ctx, c, cfg, r.ProjectID); err != nil {
+				return err
+			}
+			return shareStudioClient(cfg)
 		}},
 		{"login policy", func() error { return ensureLoginPolicy(ctx, c) }},
 		{"password policy", func() error { return ensurePasswordPolicies(ctx, c) }},
@@ -196,7 +206,7 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 			name string
 			fn   func() error
 		}{"identity machine user", func() error {
-			return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID, r.ProjectID, r.DemoGrantID)
+			return ensureIdentitySync(ctx, c, cfg, r.PlatformOrgID, r.DemoOrgID, r.ProjectID, r.DemoGrantID)
 		}}, struct {
 			name string
 			fn   func() error
@@ -411,6 +421,20 @@ func clientFileFor(path, appID, clientID string) bool {
 	return json.Unmarshal(raw, &sc) == nil && sc.AppID == appID && sc.ClientID == clientID && sc.ClientSecret != ""
 }
 
+// shareStudioClient copies StudioClientFile to StudioShareFile for the studio
+// container. It runs on every run: root cannot read the 0400 copy of another owner,
+// so writeKey replaces it through a temp file.
+func shareStudioClient(cfg Config) error {
+	if cfg.StudioShareFile == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(cfg.StudioClientFile)
+	if err != nil {
+		return err
+	}
+	return writeKey(cfg.StudioShareFile, string(raw), cfg.StudioShareOwner)
+}
+
 func writeClient(path string, sc StudioClient) error {
 	// G117: writing the secret is the point; the file is 0600 in the zitadel-admin volume.
 	b, err := json.MarshalIndent(sc, "", "  ") //nolint:gosec
@@ -619,12 +643,18 @@ const IdentitySyncUser = "identity-sync"
 // instance role and no role in the platform org.
 var IdentitySyncGrantRoles = []string{"PROJECT_GRANT_OWNER"}
 
-// ensureIdentitySync makes the machine user identity-sync in the platform org and
-// gives it IdentitySyncGrantRoles on the given project grant. When the PAT file is
+// IdentitySyncOrgRoles are its roles in each customer org (ADR-0005): create and
+// invite users (synthwerk#37) and delete the Zitadel user of a deleted account
+// (synthwerk#41). Never in the platform org.
+var IdentitySyncOrgRoles = []string{"ORG_USER_MANAGER"}
+
+// ensureIdentitySync makes the machine user identity-sync in the platform org,
+// gives it IdentitySyncGrantRoles on the given project grant and
+// IdentitySyncOrgRoles in the given customer org. When the PAT file is
 // missing it mints a PAT that lives cfg.IdentityPATLifetime, writes it for identity
 // and revokes every older PAT of the user. Zitadel shows a PAT only once, so an
 // existing file is kept (root cannot read it: it belongs to identity, mode 0400).
-func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgID, projectID, projectGrantID string) error {
+func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgID, customerOrgID, projectID, projectGrantID string) error {
 	id, err := IdentitySyncUserID(ctx, c, platformOrgID)
 	if err != nil {
 		return err
@@ -649,6 +679,9 @@ func ensureIdentitySync(ctx context.Context, c *Client, cfg Config, platformOrgI
 		return err
 	}
 	if err := GrantIdentitySync(ctx, c, platformOrgID, projectID, projectGrantID, id); err != nil {
+		return err
+	}
+	if err := GrantIdentitySyncOrg(ctx, c, platformOrgID, customerOrgID, id); err != nil {
 		return err
 	}
 	keep, err := currentPAT(ctx, c, cfg, platformOrgID, id)
@@ -762,6 +795,24 @@ func GrantIdentitySync(ctx context.Context, c *Client, platformOrgID, projectID,
 	err := c.Do(ctx, http.MethodPost, path, platformOrgID, map[string]any{"userId": userID, "roles": IdentitySyncGrantRoles}, nil)
 	if IsAlreadyExists(err) {
 		err = c.Do(ctx, http.MethodPut, path+"/"+userID, platformOrgID, map[string]any{"roles": IdentitySyncGrantRoles}, nil)
+		if IsNotChanged(err) {
+			return nil
+		}
+	}
+	return err
+}
+
+// GrantIdentitySyncOrg gives identity-sync IdentitySyncOrgRoles in one customer org
+// (ADR-0005). Whoever creates a customer org calls it, or invites (synthwerk#37)
+// answer 502 and Zitadel keeps the users of deleted accounts (synthwerk#41).
+// It refuses the platform org: there identity-sync must stay without a role.
+func GrantIdentitySyncOrg(ctx context.Context, c *Client, platformOrgID, orgID, userID string) error {
+	if orgID == "" || orgID == platformOrgID {
+		return fmt.Errorf("org %q: identity-sync gets org roles in customer orgs only", orgID)
+	}
+	err := c.Do(ctx, http.MethodPost, "/management/v1/orgs/me/members", orgID, map[string]any{"userId": userID, "roles": IdentitySyncOrgRoles}, nil)
+	if IsAlreadyExists(err) {
+		err = c.Do(ctx, http.MethodPut, "/management/v1/orgs/me/members/"+userID, orgID, map[string]any{"roles": IdentitySyncOrgRoles}, nil)
 		if IsNotChanged(err) {
 			return nil
 		}
@@ -1106,7 +1157,7 @@ func writeKey(path, key string, owner int) error {
 	// replaced through a fresh temp file (the directory belongs to root).
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
-	if err := os.WriteFile(tmp, []byte(key), 0o400); err != nil {
+	if err := os.WriteFile(tmp, []byte(key), 0o400); err != nil { //nolint:gosec // G703: path from our own config, not from a request
 		return err
 	}
 	if err := os.Chown(tmp, owner, -1); err != nil { // mode 0400: the group does not matter

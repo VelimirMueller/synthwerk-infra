@@ -35,7 +35,7 @@ expect_status() {
 
 # One-shot services: they must have exited with code 0, not be healthy.
 # Space on both ends: the loop matches *" $svc "*.
-oneshot=" database-init zitadel-bootstrap ollama-pull "
+oneshot=" database-init identity-widget-key zitadel-bootstrap ollama-pull "
 
 echo "# every default service is running and healthy"
 # "config --services" lists only the services of the active profiles (none by default,
@@ -77,6 +77,9 @@ if out=$(docker compose run --rm --no-deps zitadel-bootstrap 2>&1); then pass "z
 # Signs both test users in without a browser and checks org and roles in the token.
 out=$(docker compose run --rm --no-deps zitadel-bootstrap selftest 2>&1 || true)
 if [[ $(grep -c '"msg":"selftest ok"' <<<"$out") == 3 ]]; then pass "selftest: token claims carry org and role"; else fail "selftest: $(grep -o '"err":"[^"]*"' <<<"$out" || echo no output)"; fi
+# Account delete binds the recent MFA to the sign-in by sid, else auth_time (synthwerk#41).
+# Report only: the selftest logs whether Zitadel access tokens carry them, never the value.
+echo "info: Zitadel access token claims: $(grep -o '"has_sid":[a-z]*,"has_auth_time":[a-z]*' <<<"$out" | head -n 1 || echo 'not logged')"
 # The login UI must not see the IAM owner token.
 out=$(docker compose exec -T zitadel-login sh -c 'test -e /zitadel/admin && echo present || echo absent' 2>&1 || true)
 if [[ "$out" == "absent" ]]; then pass "zitadel-login cannot read the admin PAT"; else fail "zitadel-login sees /zitadel/admin: $out"; fi
@@ -216,6 +219,18 @@ if tests/stack/issuer.sh active; then
   out=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true' 2>/dev/null || true)
   # The monitor prints indented JSON: "name": "EVT_LLM".
   if grep -qE '"name": ?"EVT_LLM"' <<<"$out"; then pass "llm created the stream EVT_LLM"; else fail "no stream EVT_LLM on the bus"; fi
+  # Erasure (synthwerk#41): llm reads user.deleted from identity's EVT_IDENTITY with its own durable.
+  if [[ "$ready" == *'"name":"erasure"'* ]]; then
+    out=""
+    for _ in $(seq 1 20); do
+      out=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?consumers=true' 2>/dev/null || true)
+      grep -qE '"name": ?"llm-user-deleted"' <<<"$out" && break
+      sleep 2
+    done
+    if grep -qE '"name": ?"llm-user-deleted"' <<<"$out"; then pass "llm consumer llm-user-deleted is on EVT_IDENTITY"; else fail "no consumer llm-user-deleted on the bus"; fi
+  else
+    echo "skip: the llm image has no erasure consumer (synthwerk#41)"
+  fi
   logs=$(docker compose logs --no-color llm 2>&1)
   if grep -qE 'one two three|alert\(1\)|no token|forged' <<<"$logs"; then fail "llm logs hold prompt or answer text"; else pass "llm logs hold no prompt or answer text"; fi
 else
@@ -248,6 +263,8 @@ if tests/stack/issuer.sh active; then
   sync_id=$(zapi POST /management/v1/users/_search "$platform" \
     '{"queries":[{"userNameQuery":{"userName":"identity-sync","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
   zapi POST "/management/v1/projects/$project/grants/$pgrant/members" - "{\"userId\":\"$sync_id\",\"roles\":[\"PROJECT_GRANT_OWNER\"]}" >/dev/null
+  # ... and ORG_USER_MANAGER in the org (ADR-0005): invites and the removal of deleted users.
+  zapi POST /management/v1/orgs/me/members "$zorg" "{\"userId\":\"$sync_id\",\"roles\":[\"ORG_USER_MANAGER\"]}" >/dev/null
   iam=$(zapi POST /admin/v1/members/_search - '{}')
   if [[ -n "$sync_id" && "$iam" != *"$sync_id"* ]]; then pass "identity-sync has no instance role"; else fail "identity-sync '${sync_id:-missing}' is an instance member"; fi
   # After two bootstrap runs identity-sync has one live PAT: the one whose id is in the file.
@@ -328,10 +345,93 @@ if tests/stack/issuer.sh active; then
   code=$(zsync PUT "/management/v1/users/$op_id/grants/$opgrant" "$platform" '{"roleKeys":["operator","member"]}')
   keys=$(grant_keys "$platform" "$op_id")
   if [[ -n "$opgrant" && "$code" == 403 && "$keys" == '"roleKeys":["operator"]' ]]; then pass "identity-sync cannot write platform-org grants: 403"; else fail "platform grant write: status $code, grant $keys"; fi
+  # identity-sync removes the Zitadel user of a deleted account (synthwerk#41, ADR-0005):
+  # it may delete users in a customer org, never in the platform org.
+  demo=$(zapi POST /admin/v1/orgs/_search - '{"queries":[{"nameQuery":{"name":"demo","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' | first_id id)
+  demo_members=$(zapi POST /management/v1/orgs/me/members/_search "$demo" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$sync_id\"}}]}")
+  if [[ "$demo_members" == *ORG_USER_MANAGER* ]]; then pass "bootstrap gives identity-sync ORG_USER_MANAGER in the demo org"; else fail "identity-sync in the demo org: ${demo_members:0:160}"; fi
+  platform_members=$(zapi POST /management/v1/orgs/me/members/_search "$platform" "{\"queries\":[{\"userIdQuery\":{\"userId\":\"$sync_id\"}}]}")
+  if [[ "$platform_members" != *"$sync_id"* ]]; then pass "identity-sync has no role in the platform org"; else fail "identity-sync is a member of the platform org"; fi
+  # throwaway <org id> <name>: a user without grants; prints the user id.
+  throwaway() {
+    zapi POST /management/v1/users/human/_import "$1" \
+      "{\"userName\":\"$2.$$\",\"profile\":{\"firstName\":\"Gone\",\"lastName\":\"Stack\"},\"email\":{\"email\":\"$2.$$@example.test\",\"isEmailVerified\":true}}" | first_id userId
+  }
+  gone=$(throwaway "$demo" delete.demo)
+  code=$(zsync DELETE "/v2/users/$gone" "$demo")
+  if [[ -n "$gone" && "$code" == 200 ]]; then pass "identity-sync deletes a user of a customer org: 200"; else fail "delete in the demo org: user '$gone', status $code"; fi
+  kept=$(throwaway "$platform" delete.platform)
+  code=$(zsync DELETE "/v2/users/$kept" "$platform")
+  if [[ -n "$kept" && "$code" == 403 ]]; then pass "identity-sync cannot delete a platform-org user: 403"; else fail "delete in the platform org: user '$kept', status $code"; fi
+  [[ -n "$kept" ]] && zapi DELETE "/v2/users/$kept" - >/dev/null
+
+  echo "# apps and widget routes on the edge (synthwerk#30, #38)"
+  apps="$EDGE/identity/v1/orgs/$org_id/apps"
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Authorization: Bearer $tok_owner" "$apps" || true)
+  if [[ "$code" == 404 ]]; then
+    echo "skip: the identity image has no app routes (synthwerk#30)"
+  else
+    shop=https://shop.stack.test
+    app_id=$(curl -s --max-time 10 -X POST -H "Authorization: Bearer $tok_owner" -H 'Content-Type: application/json' \
+      --data "{\"name\":\"Stack shop $$\",\"allowed_origins\":[\"$shop\"]}" "$apps" | grep -oE '"id": ?"[0-9a-f-]{36}"' | head -n 1 | grep -oE '[0-9a-f-]{36}' || true)
+    if [[ -n "$app_id" ]]; then pass "owner creates app $app_id with origin $shop"; else fail "no app id from POST $apps"; fi
+    # allow_origin <curl args...>: the Access-Control-Allow-Origin of the answer, or empty.
+    allow_origin() { curl -s -o /dev/null -D - --max-time 10 "$@" | tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" { print $2 }'; }
+    settings="$EDGE/identity/v1/apps/$app_id/widget-settings"
+    # The shop origin is not in SYNTHWERK_CORS_ORIGINS: identity answers CORS per app, not edge-cors.
+    expect_status "widget settings from the listed origin, no token: 200" 200 -H "Origin: $shop" "$settings"
+    if [[ "$(allow_origin -H "Origin: $shop" "$settings")" == "$shop" ]]; then pass "widget settings allow the app origin"; else fail "widget settings: no allow-origin for $shop"; fi
+    if [[ "$(allow_origin -X OPTIONS -H "Origin: $shop" -H 'Access-Control-Request-Method: GET' "$settings")" == "$shop" ]]; then pass "widget settings preflight reaches identity"; else fail "widget settings preflight: no allow-origin for $shop"; fi
+    expect_status "widget settings from a foreign origin: 403" 403 -H 'Origin: https://evil.stack.test' "$settings"
+    if [[ -z "$(allow_origin -H 'Origin: https://evil.stack.test' "$settings")" ]]; then pass "foreign origin gets no allow-origin"; else fail "foreign origin gets an allow-origin"; fi
+    if [[ "$(allow_origin -X OPTIONS -H "Origin: $shop" -H 'Access-Control-Request-Method: POST' \
+      -H 'Access-Control-Request-Headers: authorization,content-type' "$EDGE/identity/v1/apps/$app_id/widget-tokens")" == "$shop" ]]; then
+      pass "widget token preflight reaches identity"
+    else
+      fail "widget token preflight: no allow-origin for $shop"
+    fi
+    wtok=$(curl -s --max-time 10 -X POST -H "Authorization: Bearer $tok_owner" -H "Origin: $shop" -H 'Content-Type: application/json' \
+      --data '{}' "$EDGE/identity/v1/apps/$app_id/widget-tokens" | grep -oE '"(token|access_token)": ?"[^"]+"' | head -n 1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    # Claims only (no signature check here): iss is the widget issuer, origin is bound.
+    # base64url without padding: restore "=" so GNU and BSD base64 decode the whole body.
+    wpart=$(cut -d. -f2 <<<"$wtok" | tr '_-' '/+')
+    while (( ${#wpart} % 4 )); do wpart+="="; done
+    wbody=$(printf '%s' "$wpart" | { base64 -d 2>/dev/null || true; })
+    # The issuer compose gives identity: .env, else the default from the edge port.
+    wiss=$(grep -E '^SYNTHWERK_IDENTITY_WIDGET_ISSUER=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    wiss="${wiss:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}"
+    if [[ "$wbody" == *"\"iss\":\"$wiss\""* && "$wbody" == *"\"synthwerk:origin\":\"$shop\""* ]]; then pass "widget token: iss $wiss, bound to $shop"; else fail "widget token claims: ${wbody:0:200}"; fi
+    jwks=$(curl -s --max-time 10 "$EDGE/identity/.well-known/jwks.json" || true)
+    if [[ "$jwks" == *'"kty":"EC"'* && "$jwks" == *'"crv":"P-256"'* ]]; then pass "widget key set on the edge: one P-256 key"; else fail "widget key set: ${jwks:0:120}"; fi
+  fi
+
+  echo "# own-data export (synthwerk#41)"
+  export_doc=$(curl -s --max-time 15 -H "Authorization: Bearer $tok_owner" -w '\n%{http_code}' "$EDGE/identity/v1/me/export" || true)
+  if [[ "${export_doc##*$'\n'}" == 404 ]]; then
+    echo "skip: the identity image has no export route (synthwerk#41)"
+  elif [[ "$export_doc" == *'"complete":true'* && "$export_doc" == *'"service":"llm","status":"ok"'* ]]; then
+    pass "export holds the llm part and is complete"
+  else
+    fail "export: ${export_doc:0:240}"
+  fi
+
   leak=$(isql "SELECT count(*) FROM identity.synthwerk_outbox WHERE event::text LIKE '%example.test%'")
   if [[ "$leak" == 0 ]]; then pass "no email in identity events"; else fail "identity events hold an email"; fi
 else
   echo "skip: identity does not trust the stack test issuer (run tests/stack/issuer.sh setup before compose up)"
+fi
+
+echo "# studio (profile studio)"
+if [[ -n "$(docker compose ps -q studio 2>/dev/null)" ]]; then
+  STUDIO="http://127.0.0.1:${SYNTHWERK_STUDIO_PORT:-3001}"
+  expect_status "studio home page" 200 "$STUDIO/"
+  expect_status "studio health without a session: 401" 401 "$STUDIO/api/health/status"
+  expect_status "studio apps without a session: 401" 401 "$STUDIO/api/apps"
+  # The login route redirects to Zitadel only when the server reads the issuer (alias on zitadel).
+  loc=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 10 "$STUDIO/api/auth/login" || true)
+  if [[ "$loc" == "${SYNTHWERK_ZITADEL_PUBLIC_URL:-$AUTH}/oauth/v2/authorize?"* ]]; then pass "studio login redirects to Zitadel"; else echo "info: studio login redirect '${loc%%\?*}' (sign-in needs the edge on port 8080, see compose.yaml)"; fi
+else
+  echo "skip: studio is not running (docker compose --profile studio up --build --wait)"
 fi
 
 echo "# benign requests pass the WAF"
@@ -422,8 +522,31 @@ wait_for() {
   done
   return 1
 }
+# Pulse checks the token on every /v1 route since synthwerk#40 (operator, owner or admin).
+# Older images ignore the header. Without the stack issuer the stream goes without a token.
+pulse_auth=()
+if tests/stack/issuer.sh active; then
+  tok_operator=$(tests/stack/issuer.sh mint stack-operator stack-platform operator)
+  pulse_auth=(-H "Authorization: Bearer $tok_operator")
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$EDGE/pulse/v1/metrics" || true)
+  if [[ "$code" == 404 ]]; then
+    echo "skip: the pulse image has no metrics routes (synthwerk#40)"
+  else
+    expect_status "pulse metrics without a token: 401" 401 "$EDGE/pulse/v1/metrics"
+    expect_status "pulse metrics as a member: 403" 403 -H "Authorization: Bearer $(tests/stack/issuer.sh mint stack-member stack-platform member)" "$EDGE/pulse/v1/metrics"
+    expect_status "pulse health stream without a token: 401" 401 --max-time 3 "$EDGE/pulse/v1/health/stream"
+    # Edge numbers come from Prometheus (traefik_service_*): the requests above are traffic.
+    services=""
+    for _ in $(seq 1 30); do
+      services=$(curl -s --max-time 10 "${pulse_auth[@]}" "$EDGE/pulse/v1/metrics" | { grep -oE '"service": ?"[^"]+"' || true; } | wc -l | tr -d ' ')
+      ((services > 0)) && break
+      sleep 2
+    done
+    if ((services > 0)); then pass "pulse metrics as operator: $services edge services from Prometheus"; else fail "pulse metrics as operator: no edge service from Prometheus within 60 s"; fi
+  fi
+fi
 stream_log=$(mktemp)
-curl -sN --max-time 180 "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/null &
+curl -sN --max-time 180 "${pulse_auth[@]}" "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/null &
 stream_pid=$!
 if wait_for '^event: snapshot' 10; then pass "stream starts with a snapshot"; else fail "no snapshot on the pulse stream"; fi
 # The snapshot data line can land after the event line: wait for each target.
