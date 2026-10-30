@@ -3,23 +3,26 @@
 -- a second run changes nothing except the passwords (a rotated .env applies).
 --
 -- psql variables (set with -v, never written here):
---   identity_password, llm_password, zitadel_password
+--   identity_password, llm_password, zitadel_password, studio_password
 --
 -- Layout:
 --   database synthwerk: schema identity (role identity), schema llm (role llm)
 --   database zitadel:   owned by role zitadel (Zitadel creates its own schemas)
+--   database studio:    owned by role studio (page builder, synthwerk#107; studio
+--                       runs its own migrations in the schema public)
 
 \set ON_ERROR_STOP on
 
 -- Roles. CREATE ROLE has no IF NOT EXISTS: build it with \gexec.
 SELECT format('CREATE ROLE %I LOGIN', r)
-FROM unnest(ARRAY['identity', 'llm', 'zitadel']) AS r
+FROM unnest(ARRAY['identity', 'llm', 'zitadel', 'studio']) AS r
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r)
 \gexec
 
 ALTER ROLE identity WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'identity_password';
 ALTER ROLE llm      WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'llm_password';
 ALTER ROLE zitadel  WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'zitadel_password';
+ALTER ROLE studio   WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'studio_password';
 
 -- Each service sees only its own schema.
 ALTER ROLE identity SET search_path = identity;
@@ -30,11 +33,19 @@ SELECT 'CREATE DATABASE zitadel OWNER zitadel'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'zitadel')
 \gexec
 
+-- Database studio. The owner gets CREATE on its schema public (pg_database_owner).
+SELECT 'CREATE DATABASE studio OWNER studio'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'studio')
+\gexec
+ALTER DATABASE studio OWNER TO studio;
+
 -- Connect rights: only the owner role reaches each database.
 -- The superuser (pulse, admin work) is not affected by these grants.
 REVOKE CONNECT, TEMPORARY ON DATABASE postgres FROM PUBLIC;
 REVOKE CONNECT, TEMPORARY ON DATABASE zitadel FROM PUBLIC;
 GRANT CONNECT, TEMPORARY ON DATABASE zitadel TO zitadel;
+REVOKE CONNECT, TEMPORARY ON DATABASE studio FROM PUBLIC;
+GRANT CONNECT, TEMPORARY ON DATABASE studio TO studio;
 SELECT format('REVOKE CONNECT, TEMPORARY ON DATABASE %I FROM PUBLIC', current_database())
 \gexec
 -- CREATE as well: the service migrations start with CREATE SCHEMA IF NOT EXISTS,
