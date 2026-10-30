@@ -160,8 +160,12 @@ func (s *studioClient) publishFlow(ctx context.Context, callback *url.URL) (stri
 	var sess struct {
 		CSRFToken string `json:"csrfToken"`
 	}
-	if st, err := s.sendJSON(ctx, http.MethodGet, "/api/auth/session", "", "", nil, &sess); err != nil || st != http.StatusOK || sess.CSRFToken == "" {
-		return "", fmt.Errorf("session: status %d, csrf token present %t: %w", st, sess.CSRFToken != "", err)
+	st, err := s.sendJSON(ctx, http.MethodGet, "/api/auth/session", "", "", nil, &sess)
+	if err != nil {
+		return "", fmt.Errorf("session: %w", err)
+	}
+	if st != http.StatusOK || sess.CSRFToken == "" {
+		return "", fmt.Errorf("session: status %d, csrf token present %t", st, sess.CSRFToken != "")
 	}
 	var page struct {
 		ID string `json:"id"`
@@ -245,7 +249,7 @@ func (s *studioClient) sendJSON(ctx context.Context, method, path, origin, csrf 
 	defer resp.Body.Close()
 	if out != nil && resp.StatusCode < 300 {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out); err != nil {
-			return resp.StatusCode, fmt.Errorf("%s %s: answer is not JSON", method, path)
+			return resp.StatusCode, fmt.Errorf("%s %s: answer is not JSON: %w", method, path, err)
 		}
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))

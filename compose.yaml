@@ -147,6 +147,7 @@ services:
       SYNTHWERK_NATS_USER: ${SYNTHWERK_NATS_USER:-synthwerk}
       SYNTHWERK_NATS_PASSWORD: ${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}
       SYNTHWERK_NATS_STUDIO_PASSWORD: ${SYNTHWERK_NATS_STUDIO_PASSWORD:?run scripts/init-env.sh to write .env}
+      SYNTHWERK_NATS_IDENTITY_PASSWORD: ${SYNTHWERK_NATS_IDENTITY_PASSWORD:?run scripts/init-env.sh to write .env}
     volumes:
       - ./compose/nats/nats.conf:/etc/nats/nats.conf:ro
       - bus-data:/data
@@ -154,6 +155,42 @@ services:
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+
+  # One-shot: creates or updates the streams in compose/nats/streams with the shared user
+  # (synthwerk#106). EVT_STUDIO lives here because the studio NATS user may only publish:
+  # it cannot create or change its stream. Idempotent; runs on every `up`.
+  bus-init:
+    <<: *hardening
+    restart: "no"
+    image: natsio/nats-box:0.18.1@sha256:abb33f930d25425dce3472039a0ffac7427344f7c0b7ef9849b9fe45bb8895fe
+    user: "65534:65534"
+    # The image works in /root, which this user may not read.
+    working_dir: /
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      NATS_URL: nats://bus:4222
+      NATS_USER: ${SYNTHWERK_NATS_USER:-synthwerk}
+      NATS_PASSWORD: ${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}
+    # $$ = a literal $ for the shell in the container. The file name is the stream name.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -eu;
+        for f in /streams/*.json; do
+        name=$$(basename "$$f" .json);
+        if nats stream info "$$name" >/dev/null 2>&1;
+        then nats stream edit "$$name" --config "$$f" --force >/dev/null; echo "bus-init: stream $$name updated";
+        else nats stream add "$$name" --config "$$f" >/dev/null; echo "bus-init: stream $$name created";
+        fi;
+        done
+    volumes:
+      - ./compose/nats/streams:/streams:ro
+    networks: [data]
+    depends_on:
+      bus:
+        condition: service_healthy
 
   # Database: PostgreSQL 18.
   database:
@@ -459,14 +496,14 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop 46439b3 (deploy.yml; MFA gate, widget tokens, audit of
+  # Image from synthwerk-identity develop e0a9351 (deploy.yml; MFA gate, widget tokens, audit of
   # llm AI settings and of the studio page events on EVT_STUDIO (synthwerk#106), project id
   # file and grant status events, account delete with the ID token step-up, synthwerk#41,
   # internal widget origin lookup for llm, readable widget token refusal and bidi-free greeting,
-  # synthwerk-widgets#41), pinned by digest.
+  # synthwerk-widgets#41, NATS replies on _INBOX_identity), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:46439b3e4b0080d05a3c2819b5d007a074a7c79b@sha256:24d01eaa447c2801be4568bec9fc3473f78d721cc906e499f0748f7c3132db3a
+    image: ghcr.io/velimirmueller/synthwerk-identity:e0a9351e497e5c5de9047c4a9a6022dc743ce690@sha256:f300770f0f0adb6143e8bf4143a132a49e6602e13a1a38c9081b4f43a54d03aa
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -504,7 +541,9 @@ services:
       # Invites answer 503 until then. Older images ignore it.
       SYNTHWERK_IDENTITY_ZITADEL_PROJECT_ID_FILE: /zitadel/hooks/project-id
       # org.created and member.role_changed go from the outbox to EVT_IDENTITY.
-      SYNTHWERK_IDENTITY_NATS_URL: nats://${SYNTHWERK_NATS_USER:-synthwerk}:${SYNTHWERK_NATS_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
+      # Own NATS user "identity" (synthwerk#106): EVT_IDENTITY, its own durables on EVT_LLM
+      # and EVT_STUDIO, replies on _INBOX_identity only (compose/nats/nats.conf).
+      SYNTHWERK_IDENTITY_NATS_URL: nats://identity:${SYNTHWERK_NATS_IDENTITY_PASSWORD:?run scripts/init-env.sh to write .env}@bus:4222
       # Widget tokens (synthwerk#30): ES256 key from identity-widget-key, issuer = the
       # public URL of identity on the edge. Key set: GET /identity/.well-known/jwks.json.
       # Older images ignore these.
@@ -818,9 +857,10 @@ services:
       # (dev and prd: from their secret store). Studio runs its migrations on first use.
       BUILDER_DATABASE_URL_BASE: postgres://studio@database:5432/studio?sslmode=disable
       BUILDER_DATABASE_PASSWORD_FILE: /studio-db/studio.password
-      # Relay of builder_events to EVT_STUDIO (synthwerk#106): own NATS user "studio" with
-      # rights on evt.studio.> and EVT_STUDIO only (compose/nats/nats.conf). Identity reads
-      # the stream into the org audit list.
+      # Relay of builder_events to EVT_STUDIO (synthwerk#106): own NATS user "studio" that
+      # may only publish to evt.studio.> and read its acks on _INBOX_studio
+      # (compose/nats/nats.conf). bus-init creates the stream. Identity reads the stream
+      # into the org audit list.
       NUXT_BUILDER_NATS_URL: nats://bus:4222
       NUXT_BUILDER_NATS_USER: studio
       NUXT_BUILDER_NATS_PASSWORD: ${SYNTHWERK_NATS_STUDIO_PASSWORD:?run scripts/init-env.sh to write .env}
@@ -838,9 +878,9 @@ services:
       # The database and the role studio exist before the first builder call.
       database-init:
         condition: service_completed_successfully
-      # The relay connects at start; it also retries while the bus is down.
-      bus:
-        condition: service_healthy
+      # The relay connects at start; it also retries while the bus or the stream is missing.
+      bus-init:
+        condition: service_completed_successfully
       zitadel-bootstrap:
         condition: service_completed_successfully
       identity:
