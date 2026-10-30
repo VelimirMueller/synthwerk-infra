@@ -56,7 +56,7 @@ updated: 2026-10-30
 | Studio URIs | Exact `http(s)` URIs, comma list, no wildcard. An `http` URI turns on Zitadel dev mode for the app. |
 | Test users | Local and ci only. The password is the `.env` value plus `Aa1!` (complexity policy). Leave the key out on dev and prd. |
 | MFA and the session API | Zitadel enforces "MFA required" in the login UI only. With the MFA gate on, identity refuses every sign-in call whose session has no second factor, and access tokens carry `amr` ([ADR-0004](../adr/0004-mfa-is-enforced-on-the-server-by-a-request-execution.md)). With the gate off, a password-only Session API sign-in gets a token without `amr` and `RequireMFA` refuses it ([ADR-0002](../adr/0002-mfa-is-enforced-by-the-zitadel-login-ui-only.md)). |
-| MFA gate switch | `SYNTHWERK_ZITADEL_MFA_GATE`, default `false`: the pinned identity image has no gate routes yet, and with the gate on every sign-in would fail. Turn it on with an identity image from synthwerk-identity#94 or later. Needs `SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL`. |
+| MFA gate switch | `SYNTHWERK_ZITADEL_MFA_GATE`, default `true` since 2026-10-30: the pinned identity image has the gate routes. With an identity image older than synthwerk#94, every sign-in fails: set it to `false`. Needs `SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL`. |
 | MFA gate failure | Fail closed: identity down or its key file missing = every sign-in gets 403 or 412. The claims target failing = a token without `amr`. |
 | Self-registration | Off on every org (`allowRegister: false`, D-51). Users come by invite: create the user, then `POST /v2/users/{id}/invite_code`. |
 | Mail | `SYNTHWERK_ZITADEL_SMTP_HOST` (default `mailpit:1025`): the bootstrap creates and activates the SMTP provider `synthwerk-local` without TLS and login (D-49). Empty = the provider is left alone (dev and prd use Resend). |
@@ -112,3 +112,4 @@ updated: 2026-10-30
 | 2026-10-29 | MFA gate targets and executions behind `SYNTHWERK_ZITADEL_MFA_GATE`; selftest proves the gate (synthwerk#94). |
 | 2026-10-28 | Org roles: demo grant has `owner`, test user `owner.demo`, grant event executions, machine user `identity-sync` and its PAT (synthwerk#29). |
 | 2026-10-30 | `identity-sync` gets `ORG_USER_MANAGER` in customer orgs (ADR-0005); studio client copy for the studio container; `widget-key` subcommand; selftest logs `sid` and `auth_time` presence (synthwerk#30, #37, #41). |
+| 2026-10-30 | MFA gate on by default: the pinned identity image (`develop` `d4fb74a`) has the gate routes (synthwerk#94). |

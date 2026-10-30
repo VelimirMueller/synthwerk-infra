@@ -132,3 +132,4 @@ updated: 2026-10-30
 | 2026-10-29 | Telemetry: collector overlay truncates client IPs in spans (#3). |
 | 2026-10-28 | Org roles: identity token check, Zitadel grant writes as `identity-sync`, relay to `EVT_IDENTITY`, PATCH on the member route through CORS and WAF (synthwerk#29). |
 | 2026-10-30 | Widget key and issuer, widget routes without edge CORS, export source llm, pulse token check and Prometheus, Zitadel issuer alias, studio profile (synthwerk#30, #37, #38, #40, #41). |
+| 2026-10-30 | Pins identity, llm and pulse images published from `develop` by `deploy.yml`; llm gets `SYNTHWERK_LLM_IDENTITY_URL`, studio gets `NUXT_LLM_URL` (synthwerk#39). |

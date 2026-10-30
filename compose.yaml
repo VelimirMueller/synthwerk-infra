@@ -94,10 +94,11 @@ services:
 
   # Pulse: checks every part of this stack and streams the status over SSE
   # (GET /pulse/v1/health/stream on the edge). Targets: compose/pulse/targets.yaml.
-  # Image from synthwerk-pulse main 06b20b4 (sha-06b20b4f7f08), pinned by digest.
+  # Image from synthwerk-pulse develop 984d77e (deploy.yml, token check + metrics, synthwerk#40),
+  # pinned by digest.
   pulse:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-pulse:sha-06b20b4f7f0895d4c0eac6613a8a2263b196ba31@sha256:2f49a6ff8d4f1a7492286c7c76729d6b47716702b38d758ef46a1ee3c5e65bcd
+    image: ghcr.io/velimirmueller/synthwerk-pulse:984d77e14e759566d369f31d09036b2be5066e2a@sha256:6e37c2b022310bb5860c3f96d4064eea7589918490482161616e237f448a215f
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -337,9 +338,9 @@ services:
       # Action target for identity (#28 task 5). Zitadel resolves the name when it
       # saves the target, so identity must be up on zitadel-hooks first.
       SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: http://identity-hooks:8081/internal/zitadel/actions
-      # Server-side MFA gate (synthwerk#94, ADR-0002 option C). Off until the pinned
-      # identity image has the gate routes: with an older image every sign-in fails.
-      SYNTHWERK_ZITADEL_MFA_GATE: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
+      # Server-side MFA gate (synthwerk#94, ADR-0004). On by default: the pinned identity
+      # image has the gate routes. With an identity image older than #94 every sign-in fails.
+      SYNTHWERK_ZITADEL_MFA_GATE: ${SYNTHWERK_ZITADEL_MFA_GATE:-true}
       # Mail (invite codes, email verification) goes to Mailpit in local and ci (D-49).
       # Dev and prd set this to empty and keep their provider (Resend) out of the bootstrap.
       SYNTHWERK_ZITADEL_SMTP_HOST: ${SYNTHWERK_ZITADEL_SMTP_HOST-mailpit:1025}
@@ -404,10 +405,11 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity main 9fba3fd (orgs and roles, synthwerk#29), pinned by digest.
+  # Image from synthwerk-identity develop d4fb74a (deploy.yml; MFA gate, widget tokens, audit of
+  # llm AI settings, synthwerk#39), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:sha-9fba3fd81729f6466eacd3d55c321dc2fb4e63b7@sha256:38a95f585ef964f14bb92853074f8a4b159107dc08e7483b6020b372cac3c2cc
+    image: ghcr.io/velimirmueller/synthwerk-identity:d4fb74ad5b4f46a9e6f109be9ff9fd391c1dfa02@sha256:b804c4618c41215b536ba3bb905ca09e46faba837b828d25a05dc9a95466f30e
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -468,10 +470,11 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm main cb133cb (chat gateway, synthwerk#32), pinned by digest.
+  # Image from synthwerk-llm develop 233290c (deploy.yml; AI settings per org, synthwerk#39),
+  # pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:sha-cb133cb75be595c97e92da14c734d2701767fb89@sha256:fcb98cbc248a0836ceaa2852d6cb38c52179151862abc53dfdb7bc97d20cee38
+    image: ghcr.io/velimirmueller/synthwerk-llm:233290c40bb2bc6e8bd7e202fe157b1a3dc430da@sha256:eb088a4c351d39cba2a63bea462f348b7811b1dd8f8a63698af74e97b599d634
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -492,6 +495,8 @@ services:
       SYNTHWERK_LLM_OIDC_ISSUER: ${SYNTHWERK_LLM_OIDC_ISSUER:-http://auth.localhost:8080}
       SYNTHWERK_LLM_OIDC_AUDIENCE: ${SYNTHWERK_LLM_OIDC_AUDIENCE:-synthwerk-api}
       SYNTHWERK_LLM_JWKS_URL: ${SYNTHWERK_LLM_JWKS_URL:-}
+      # AI settings (synthwerk#39): llm checks membership and plan limit with identity.
+      SYNTHWERK_LLM_IDENTITY_URL: http://identity:8080
     networks: [app, data]
     depends_on:
       database-init:
@@ -525,7 +530,7 @@ services:
       NUXT_OIDC_POST_LOGOUT_REDIRECT_URI: http://localhost:${SYNTHWERK_STUDIO_PORT:-3001}/
       # Same switch as the server-side gate: studio refuses tokens without mfa only
       # when Zitadel puts amr into them (synthwerk#94).
-      NUXT_OIDC_REQUIRE_MFA: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
+      NUXT_OIDC_REQUIRE_MFA: ${SYNTHWERK_ZITADEL_MFA_GATE:-true}
       # Not required here: a stale .env must not break "up" without the profile. Empty =
       # studio answers 500 (NUXT_SESSION_SECRET must be set) and stays unhealthy;
       # scripts/init-env.sh appends a generated value.
@@ -533,6 +538,8 @@ services:
       # Server side, inside the stack: identity and pulse directly, not through the edge.
       NUXT_IDENTITY_URL: http://identity:8080
       NUXT_PULSE_BASE_URL: http://pulse:8080
+      # AI settings page (synthwerk#39).
+      NUXT_LLM_URL: http://llm:8080
       # The embed snippet: where the widget script is served (synthwerk-widgets dev
       # server by default) and the edge the widget calls.
       NUXT_PUBLIC_WIDGET_SCRIPT_URL: ${SYNTHWERK_STUDIO_WIDGET_SCRIPT_URL:-http://localhost:4174/dist/synthwerk-chat.js}
