@@ -80,13 +80,11 @@ if (process.argv[2] === 'builder-db-check') {
   } finally {
     await client.end().catch(() => {})
   }
-  process.exit()
-}
-
-if (process.argv[2] === 'healthcheck') {
+  // No process.exit() here: it can cut the line above short on a pipe.
+} else if (process.argv[2] === 'healthcheck') {
   // Container health check: the server answers on its port.
   const res = await fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}/api/auth/session`)
   process.exit(res.status < 500 ? 0 : 1)
+} else {
+  await import('./.output/server/index.mjs')
 }
-
-await import('./.output/server/index.mjs')

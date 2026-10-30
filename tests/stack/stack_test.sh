@@ -712,7 +712,7 @@ fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { au
   if [[ "$out" == *'"role":"studio","db":"studio","can_create":true'* ]]; then pass "studio connects to its own database as role studio and may create tables"; else fail "studio builder database: ${out:0:200}"; fi
   # The password lives in the volume only: read it from the studio container, never print it.
   studio_pw=$(docker compose exec -T studio cat /studio-db/studio.password 2>/dev/null | tr -d '\r\n' || true)
-  if [[ -n "$studio_pw" ]] && ! grep -q "$studio_pw" .env compose.yaml; then pass "studio database password is in the volume, not in .env or compose.yaml"; else fail "studio database password missing or in a file of the repo"; fi
+  if [[ -n "$studio_pw" ]] && ! grep -qF -- "$studio_pw" .env compose.yaml; then pass "studio database password is in the volume, not in .env or compose.yaml"; else fail "studio database password missing or in a file of the repo"; fi
   out=$(docker compose exec -T -e PGPASSWORD="$studio_pw" database psql -h 127.0.0.1 -U studio -d "${SYNTHWERK_POSTGRES_DB:-synthwerk}" -tAc 'SELECT 1' 2>&1 || true)
   if [[ "$out" == *"permission denied"* ]]; then pass "role studio cannot connect to the synthwerk database"; else fail "role studio reaches the synthwerk database: ${out:0:120}"; fi
   unset studio_pw
