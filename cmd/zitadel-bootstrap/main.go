@@ -6,6 +6,7 @@
 //	zitadel-bootstrap           apply the setup
 //	zitadel-bootstrap selftest  sign the test users in and check the token claims
 //	zitadel-bootstrap delete-check  sign a throwaway user in with step-up and delete it in identity
+//	zitadel-bootstrap builder-check sign owner.demo into studio and call the page builder
 package main
 
 import (
@@ -35,11 +36,13 @@ func main() {
 			run = selftest
 		case "delete-check":
 			run = deleteCheck
+		case "builder-check":
+			run = builderCheck
 		case "widget-key":
 			run = widgetKey
 		default:
 			// Never fall back to the full bootstrap on a typo.
-			log.Error("unknown subcommand: want selftest, delete-check or widget-key", "arg", os.Args[1])
+			log.Error("unknown subcommand: want selftest, delete-check, builder-check or widget-key", "arg", os.Args[1])
 			os.Exit(2)
 		}
 	}

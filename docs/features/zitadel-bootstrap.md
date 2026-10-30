@@ -44,7 +44,8 @@ updated: 2026-10-30
 2. Read the result: `docker compose logs zitadel-bootstrap`. The last line lists the org, project and client ids.
 3. Check sign-in and claims: `docker compose run --rm --no-deps zitadel-bootstrap selftest`. Its log also says whether the access token has `sid` and `auth_time` (names only). With the MFA gate on, it first proves that a password-only sign-in gets no token, then enrols a new TOTP for each test user and signs in with password and TOTP; the token must have `amr` with `mfa`.
 4. Check the account delete (synthwerk#41): `docker compose run --rm --no-deps zitadel-bootstrap delete-check`. It makes a throwaway user `delete-check.<random>` in the demo org, enrols TOTP, signs in with the studio step-up (`prompt=login`, `max_age=0`) and calls identity `DELETE /v1/me`: without `X-Synthwerk-Id-Token` it wants 403 `recent_mfa_required`, with the fresh ID token 202. identity must trust Zitadel (issuer `http://<domain>:8080`, audience the project id); the stack test sets that. It logs status codes and the user id, never a token. Local and ci only (needs the test user password). Without a 202 it removes the user itself.
-5. Change a setting in `zitadel/bootstrap/bootstrap.go`, then `docker compose up --build zitadel-bootstrap`.
+5. Check the studio page builder database (synthwerk#107): `docker compose --profile studio run --rm --no-deps zitadel-bootstrap builder-check`. It signs `owner.demo` in through the studio code flow (studio login, Zitadel authorize, session with password and TOTP, studio callback) and calls studio `GET /api/auth/session` and `GET /api/builder/pages` with the session cookie. It wants a session (200) and no 503 from the builder. The builder answers 200 only when identity trusts Zitadel; the stack test sets that. It logs status codes, never a token or a cookie. Local and ci only.
+6. Change a setting in `zitadel/bootstrap/bootstrap.go`, then `docker compose up --build zitadel-bootstrap`.
 
 ## Rules and limits
 
@@ -104,6 +105,7 @@ updated: 2026-10-30
 - `tests/stack/stack_test.sh` — `identity-sync - ORG_USER_MANAGER in the demo org, no platform-org role; deletes a customer-org user 200, a platform-org user 403`
 - `tests/stack/stack_test.sh` — `zitadel-bootstrap - first run exited 0, rerun exits 0; selftest - all test users get org and role claims; zitadel-login - cannot read the admin PAT`
 - `tests/stack/stack_test.sh` — `delete-check - no ID token - 403 recent_mfa_required; fresh step-up ID token - 202; Zitadel user removed by identity`
+- `tests/stack/stack_test.sh` — `builder-check - owner.demo session through the studio code flow - 200; builder - not 503 (200 with identity on Zitadel)`
 
 ## Changes
 
@@ -118,3 +120,4 @@ updated: 2026-10-30
 | 2026-10-30 | MFA gate on by default: the pinned identity image (`develop` `d4fb74a`) has the gate routes (synthwerk#94). |
 | 2026-10-30 | Project id file for identity; grant deactivate and reactivate events go to the identity hook (synthwerk#37). |
 | 2026-10-30 | Subcommand `delete-check`: account delete with real Zitadel tokens and the ID token step-up (synthwerk#41). |
+| 2026-10-30 | Subcommand `builder-check`: studio sign-in through its own code flow and the page builder with a session (synthwerk#107). |

@@ -1,5 +1,5 @@
 # Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
-# identity and llm; vision and studio with a profile.
+# identity, llm and the mascot; vision and studio with a profile.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -49,7 +49,13 @@ services:
     volumes:
       - ./compose/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./compose/traefik/dynamic:/etc/traefik/dynamic:ro
-    networks: [edge, app]
+    networks:
+      edge: {}
+      app: {}
+      # The only other member of the network "mascot". Fixed: the mascot trusts
+      # X-Forwarded-For from this address only (FORWARDED_ALLOW_IPS).
+      mascot:
+        ipv4_address: 172.31.251.2
     depends_on:
       waf:
         condition: service_healthy
@@ -163,6 +169,43 @@ services:
       <<: *healthcheck
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
 
+  # One-shot: the password of the database role studio (synthwerk#107). Made once per
+  # volume at the first start, never in git or .env. .password (root) holds the value;
+  # a missing copy is made from it: postgres.password for database-init (uid 70) and
+  # studio.password for studio (uid 65532), each mode 0400. Prints no value.
+  studio-db-secret:
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    # CHOWN: each copy belongs to the user of the service that reads it.
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    # $$ = a literal $ for the shell in the container. Hex only: the value goes into a URL.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -eu;
+        umask 077;
+        if [ ! -s /secrets/.password ]; then
+        od -An -tx1 -N24 /dev/urandom | tr -d ' \n' > /secrets/.password.new;
+        mv /secrets/.password.new /secrets/.password;
+        rm -f /secrets/postgres.password /secrets/studio.password;
+        fi;
+        for pair in postgres:70 studio:65532; do
+        name=$${pair%%:*}; uid=$${pair##*:};
+        [ -s "/secrets/$$name.password" ] && continue;
+        rm -f "/secrets/$$name.password";
+        cp /secrets/.password "/secrets/$$name.password";
+        chmod 0400 "/secrets/$$name.password";
+        chown "$$uid" "/secrets/$$name.password";
+        done
+    volumes:
+      - studio-db:/secrets
+    network_mode: none
+
   # One-shot: roles, schemas and the zitadel database (compose/database/init.sql).
   # docker-entrypoint-initdb.d runs only on an empty volume, so this runs on every
   # `up` instead. The script is idempotent and applies rotated passwords.
@@ -182,21 +225,28 @@ services:
       LLM_PASSWORD: ${SYNTHWERK_LLM_DB_PASSWORD:?run scripts/init-env.sh to write .env}
       ZITADEL_PASSWORD: ${SYNTHWERK_ZITADEL_DB_PASSWORD:?run scripts/init-env.sh to write .env}
     # $$ = a literal $ for the shell in the container, not compose interpolation.
+    # The studio password comes from the file studio-db-secret wrote (synthwerk#107).
     entrypoint:
       - sh
       - -c
       - >-
+        STUDIO_PASSWORD=$$(cat /studio-db/postgres.password) && [ -n "$$STUDIO_PASSWORD" ]
+        || { echo "database-init: no studio password in /studio-db (run studio-db-secret)" >&2; exit 1; };
         exec psql -X -q -v ON_ERROR_STOP=1
         -v identity_password="$$IDENTITY_PASSWORD"
         -v llm_password="$$LLM_PASSWORD"
         -v zitadel_password="$$ZITADEL_PASSWORD"
+        -v studio_password="$$STUDIO_PASSWORD"
         -f /init/init.sql
     volumes:
       - ./compose/database/init.sql:/init/init.sql:ro
+      - studio-db:/studio-db:ro
     networks: [data]
     depends_on:
       database:
         condition: service_healthy
+      studio-db-secret:
+        condition: service_completed_successfully
 
   # Zitadel v4 (D-42): OIDC, API and console. Login UI v2 is zitadel-login.
   # Reached on the edge by host name: http://auth.localhost:8080 locally.
@@ -534,6 +584,36 @@ services:
       <<: *healthcheck
       test: ["CMD", "/llm", "healthcheck"]
 
+  # synthwerk-mascot: the public helper (synthwerk#48). Answers without sign-in with cited
+  # passages of the public docs; model and index are in the image. No database, no bus,
+  # no telemetry export, no egress: its only network is "mascot" (internal, no gateway),
+  # shared with the edge alone. Image from synthwerk-mascot develop f2850fb (deploy.yml),
+  # pinned by digest. linux/amd64 only: on an arm64 Mac it runs under emulation.
+  mascot:
+    <<: *hardening
+    image: ghcr.io/velimirmueller/synthwerk-mascot:f2850fb694d58ff7aa603c5f23067819744d33cb@sha256:a7672748969f25424880fa0fc2f7e967670a58aaad99b6a26be9e0b2cd073715
+    platform: linux/amd64
+    read_only: true
+    cap_drop: [ALL]
+    # Emulation on an arm64 host (Rosetta) needs a writable /tmp; the image itself writes none.
+    tmpfs: [/tmp]
+    mem_limit: 1g
+    environment:
+      SYNTHWERK_PLATFORM_ENV: ${SYNTHWERK_PLATFORM_ENV:-local}
+      # uvicorn takes the client address from X-Forwarded-For only when the peer is the
+      # edge, so the per-client rate limit counts real clients, not the edge.
+      FORWARDED_ALLOW_IPS: 172.31.251.2
+      # Browser origins of the public site (studio public routes, synthwerk#45). JSON list.
+      SYNTHWERK_MASCOT_CORS_ORIGINS: ${SYNTHWERK_MASCOT_CORS_ORIGINS:-["http://localhost:3000","http://localhost:3001"]}
+    networks:
+      mascot:
+        ipv4_address: 172.31.251.3
+    healthcheck:
+      <<: *healthcheck
+      # /readyz: 200 once the model and the index are loaded, 503 before.
+      start_period: 60s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+
   # One-shot: the service token of the vision label admin (synthwerk#44). Made once per
   # volume at the first start, never in git. .token (root) holds the value; a missing copy
   # is made from it: vision.token for vision (uid 10001), studio.token for studio
@@ -729,14 +809,25 @@ services:
       # the file is missing and /api/labels answers 503.
       NUXT_VISION_URL: http://vision:8000
       VISION_ADMIN_TOKEN_FILE: /vision/studio.token
+      # Page builder database (synthwerk#107): own database "studio", own role "studio".
+      # studio/start.mjs puts the password from the file studio-db-secret wrote into this
+      # URL and sets NUXT_BUILDER_DATABASE_URL. A NUXT_BUILDER_DATABASE_URL in the env wins
+      # (dev and prd: from their secret store). Studio runs its migrations on first use.
+      BUILDER_DATABASE_URL_BASE: postgres://studio@database:5432/studio?sslmode=disable
+      BUILDER_DATABASE_PASSWORD_FILE: /studio-db/studio.password
     volumes:
       - studio-client:/studio:ro
       - vision-admin:/vision:ro
+      - studio-db:/studio-db:ro
     ports:
       - "127.0.0.1:${SYNTHWERK_STUDIO_PORT:-3001}:3000"
-    # "edge" for the published port; "app" for Zitadel, identity and pulse.
-    networks: [edge, app]
+    # "edge" for the published port; "app" for Zitadel, identity and pulse; "data" for
+    # its database.
+    networks: [edge, app, data]
     depends_on:
+      # The database and the role studio exist before the first builder call.
+      database-init:
+        condition: service_completed_successfully
       zitadel-bootstrap:
         condition: service_completed_successfully
       identity:
@@ -811,6 +902,16 @@ networks:
   # Bus and database. No egress, no published ports.
   data:
     internal: true
+  # Edge to mascot (synthwerk#48), and nothing else. Internal with an isolated gateway:
+  # the host bridge has no address here, so the mascot reaches neither the internet
+  # nor the host. Fixed subnet: the edge (172.31.251.2) is the mascot's trusted proxy.
+  mascot:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 172.31.251.0/29
   # Zitadel Action webhooks: Zitadel calls identity here, and nothing else.
   # Fixed subnet: identity has 172.31.250.10, the one address ZITADEL_HTTPCLIENT_DENYLIST leaves open.
   zitadel-hooks:
@@ -839,6 +940,9 @@ volumes:
   # Service token of the vision label admin (synthwerk#44). vision-admin-token writes,
   # vision and studio read their own copy. Holds a secret: never copy it out of the stack.
   vision-admin: {}
+  # Password of the database role studio (synthwerk#107). studio-db-secret writes,
+  # database-init and studio read their own copy. Holds a secret: never copy it out.
+  studio-db: {}
   # Vision uploads (local backend), runtime labels and corrections.
   vision-data: {}
   # Vision text embeddings of added labels.

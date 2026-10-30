@@ -65,6 +65,17 @@ http:
       middlewares: [edge-secure, strip-service-prefix]
       service: vision
 
+    # mascot (synthwerk#48): the public helper, no sign-in. Only the answer route and the
+    # health checks. The mascot answers CORS itself from SYNTHWERK_MASCOT_CORS_ORIGINS (the
+    # public site), so edge-cors stays off. WAF, rate limit and body limit stay on; the
+    # mascot adds its own limit per client (6 a minute) from X-Forwarded-For, which the
+    # edge sets to the client address (incoming X-Forwarded-* headers are not trusted).
+    mascot:
+      rule: PathRegexp(`^/mascot/(v1/answers|healthz|readyz)$`)
+      entryPoints: [web]
+      middlewares: [edge-secure, strip-service-prefix]
+      service: mascot
+
     # Zitadel on its own host (D-42). The rule is a template: the host comes from
     # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
     # Templating: the Traefik file provider renders Go templates (with Sprig) in
@@ -133,6 +144,12 @@ http:
       loadBalancer:
         servers:
           - url: http://vision:8000
+
+    # Reached over the network "mascot" only (edge and mascot, no gateway).
+    mascot:
+      loadBalancer:
+        servers:
+          - url: http://mascot:8000
 
     # The Zitadel API speaks gRPC and HTTP/1.1 on one port without TLS: h2c.
     zitadel:

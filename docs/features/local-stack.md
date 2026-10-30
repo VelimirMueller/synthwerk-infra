@@ -4,7 +4,7 @@ slug: local-stack
 status: beta
 epic: E1
 owner: infra
-paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "zitadel/**", "studio/**"]
+paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "zitadel/**", "studio/**", "cmd/zitadel-bootstrap/**"]
 api: []
 events: []
 mcp: []
@@ -19,6 +19,8 @@ updated: 2026-10-30
 > - Pulse streams the status of each part at `/pulse/v1/health/stream`. A stopped part shows as `down` within 30 s.
 > - `docker compose --profile studio up --build --wait` also builds and starts studio from a synthwerk-studio checkout, at `http://localhost:3001`.
 > - `docker compose --profile vision up --wait` also starts vision (published image) at `/vision` on the edge. It takes widget tokens from identity.
+> - The mascot (public helper, synthwerk#48) answers at `/mascot/v1/answers` without sign-in. Its only network is shared with the edge and has no route out.
+> - Studio has its own Postgres database `studio` and role `studio` for the page builder (synthwerk#107). The password is made in a volume at the first start.
 
 ## What it does
 
@@ -60,6 +62,12 @@ updated: 2026-10-30
 - The one-shot `vision-admin-token` makes the label admin token once per volume `vision-admin` (synthwerk#44). vision reads its copy (uid 10001, mode 0400) into `SYNTHWERK_VISION_ADMIN_TOKEN` at start. studio reads its copy (uid 65532, mode 0400) into `NUXT_VISION_ADMIN_TOKEN` (`studio/start.mjs`) and calls `NUXT_VISION_URL=http://vision:8000`. The token is in no file in git and in no process argument.
 - vision stores uploads per org with a byte and a file quota and a total byte cap (synthwerk#36, #77): `SYNTHWERK_VISION_UPLOAD_QUOTA_BYTES`, `_FILES`, `_TOTAL_BYTES`, `SYNTHWERK_VISION_UPLOAD_WRITERS`. Backend `local` (default, volume `vision-data`) or `s3` (`SYNTHWERK_VISION_STORAGE_BACKEND`).
 - Profile `vision-s3`: Moto as an S3 emulator (`objectstore`, data in memory) and the one-shot `objectstore-bucket`. With `SYNTHWERK_VISION_STORAGE_BACKEND=s3`, vision stores uploads there and `/readyz` checks the bucket.
+- Starts synthwerk-mascot (synthwerk#48) from its GHCR image, pinned by digest (linux/amd64; on an arm64 Mac it runs under emulation and needs the `/tmp` tmpfs). Model and docs index are in the image.
+- The mascot's only network is `mascot`: internal, gateway mode `isolated` (the host bridge has no address there), subnet `172.31.251.0/29`. Only the edge (`172.31.251.2`) and the mascot (`172.31.251.3`) are on it. The mascot has no default route, no DNS for outside or stack names, no database, no bus and no telemetry export.
+- The edge routes only `/mascot/v1/answers`, `/mascot/healthz` and `/mascot/readyz` (router `mascot`, chain `edge-secure`, no `edge-cors`). The mascot answers CORS itself for `SYNTHWERK_MASCOT_CORS_ORIGINS` (JSON list; default `["http://localhost:3000","http://localhost:3001"]`, the studio public routes).
+- `FORWARDED_ALLOW_IPS=172.31.251.2`: uvicorn takes the client address from `X-Forwarded-For` only from the edge. The edge does not trust incoming `X-Forwarded-*` headers, so the mascot limit (6 questions per client a minute, 60 for all) counts real clients. A forged `X-Forwarded-For` changes nothing.
+- Studio page builder database (synthwerk#107): `database-init` creates the role `studio` and the database `studio` (owner `studio`). Only `studio` may connect to it; `studio` may not connect to `synthwerk` or `zitadel`. Studio runs its own migrations on the first builder call, in the schema `public`.
+- The one-shot `studio-db-secret` makes the `studio` password once per volume `studio-db` (48 hex characters, never in `.env` or git). `database-init` reads its copy (uid 70) and applies it on every `up`. `studio/start.mjs` reads its copy (uid 65532) into `NUXT_BUILDER_DATABASE_URL` (`BUILDER_DATABASE_URL_BASE` plus the password). A `NUXT_BUILDER_DATABASE_URL` set in the env wins. Studio joins the network `data` to reach the database.
 - `tests/stack/issuer.sh setup` makes a local token issuer for the stack test: an RSA key, its key set on the stub (`/issuer/jwks.json`), and `.env` lines that point llm, identity and pulse at it (pulse platform org `stack-platform`). Without it, llm trusts Zitadel (`http://auth.localhost:8080`), and its `jwks` readiness check stays `degraded` until #28/#30 wire the Zitadel audience and key set.
 
 ## How to use
@@ -89,10 +97,12 @@ updated: 2026-10-30
 | Vision upload size | 1 MiB (`SYNTHWERK_VISION_MAX_UPLOAD_BYTES`), the edge body limit. |
 | Vision quotas in the stack | 100 MiB and 1000 files per org, 500 MiB for all orgs (`.env.example`). CI: 3 files per org. |
 | Vision admin token | Made once per volume `vision-admin`; `docker compose down --volumes` makes a new one. |
+| Studio database password | Made once per volume `studio-db`; `database-init` applies it on every `up`. To rotate: delete the volume `studio-db` (or its files) and run `up` again. |
+| Mascot rate limit | 6 questions per client a minute, 60 for all clients (mascot defaults). Over the limit: 429 with `Retry-After`. |
 | Widget key | Made once per volume; `docker compose down --volumes` makes a new key (widget tokens issued before fail). |
 | New images and older images | The pinned images have the routes of synthwerk#30, #38, #40 and #41. An older image ignores the new variables, and the stack test skips those checks with a `skip:` line. |
 | Bus and database ports on the host | none |
-| Networks | `edge` (published), `app`, `data` and `zitadel-hooks` (internal; `zitadel-hooks` = Zitadel and identity (`172.31.250.10`) only, subnet `172.31.250.0/28`), `models` (Ollama egress) |
+| Networks | `edge` (published), `app`, `data`, `zitadel-hooks` and `mascot` (internal; `zitadel-hooks` = Zitadel and identity (`172.31.250.10`) only, subnet `172.31.250.0/28`; `mascot` = edge (`172.31.251.2`) and mascot only, subnet `172.31.251.0/29`, no gateway), `models` (Ollama egress) |
 | Health check timeout in CI | 300 s |
 | Service env | `SYNTHWERK_PLATFORM_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` (anchor `x-service-env`) |
 | Service OTLP | gRPC on `telemetry:4317` (anchor `x-service-env`). The edge sends OTLP HTTP on 4318 from `traefik.yml`. |
@@ -100,7 +110,8 @@ updated: 2026-10-30
 | Zitadel URL | `http://auth.localhost:8080`. Domain, port, secure flag and URL come from `SYNTHWERK_ZITADEL_*`. They must match the public URL, else Zitadel answers "Instance not found". They are fixed at the first start of a volume. |
 | Dev VPS (D-42) | `SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN=synthwerkauth.velimir-mueller.de`, `_EXTERNAL_PORT=443`, `_EXTERNAL_SECURE=true`, `_PUBLIC_SCHEME=https`, `_PUBLIC_URL=https://synthwerkauth.velimir-mueller.de` |
 | Generated secrets | `*_PASSWORD`, `*_SECRET` (48 hex characters), `*_MASTERKEY` (32 hex characters), by `scripts/init-env.sh` |
-| Service database roles | `identity` and `llm`: own schema, `search_path` set, CONNECT and CREATE on `synthwerk` only (the migrations run `CREATE SCHEMA IF NOT EXISTS`). `zitadel`: owns the `zitadel` database. No role can reach another role's schema or database. |
+| Service database roles | `identity` and `llm`: own schema, `search_path` set, CONNECT and CREATE on `synthwerk` only (the migrations run `CREATE SCHEMA IF NOT EXISTS`). `zitadel`: owns the `zitadel` database. `studio`: owns the `studio` database (synthwerk#107). No role can reach another role's schema or database. |
+| Backups on dev and prd | Not in this repo yet (no deploy target). The backup job must dump all three databases: `synthwerk`, `zitadel` and `studio` (`pg_dump -Fc` per database, plus `pg_dumpall --globals-only` for the roles). The `studio` dump holds the builder pages, versions and events: losing it loses every published page. Keep the `studio` password in the secret store of the host, not in the dump job's files. Test a restore before go-live. |
 | Zitadel containers | Run as root without capabilities (`cap_drop: ALL`, `no-new-privileges`, read-only). The login UI must read the PAT file that the API writes into the root-owned volume `zitadel-bootstrap`. The IAM owner PAT goes to a separate volume, `zitadel-admin`, which the login UI does not mount. |
 | Memory (measured 2026-10-23, idle) | zitadel 92 MiB, zitadel-login 82 MiB, identity 51 MiB, llm 10 MiB. The spike measured 230–360 MiB for Zitadel after sign-ins. The whole stack is about 1.4 GiB, of which telemetry is about 870 MiB. The 7.7 GiB VPS has room. |
 
@@ -136,6 +147,10 @@ updated: 2026-10-30
 - `tests/stack/stack_test.sh` — `studio - home 200, health, apps and labels 401 without a session; studio container reaches the vision label admin with its token - 200` (profile studio only)
 - `tests/stack/stack_test.sh` — `vision - readyz model ok; classification without, with a forged or a user token - 401; widget token from another origin - 403; widget token from the app origin - 200; upload - 201, past the file quota - 507, objects under the org in the backend; s3 - bucket check ok; label admin on the edge - 404; admin token inside the stack - 200, wrong token - 401` (profile vision only)
 - `tests/stack/stack_test.sh` — `vision CORS - preflight from the app origin on classifications and images - 204 with one allow-origin; origin without an app - 403; classification answer - allow-origin; upload over 1 MiB - 413 at the edge` (profile vision only)
+- `tests/stack/stack_test.sh` — `database - roles identity and llm - no connect to database studio; database studio owned by role studio`
+- `tests/stack/stack_test.sh` — `studio builder database - start.mjs connects as role studio to database studio, may create; password in the volume, not in .env or compose.yaml; role studio - no connect to synthwerk; builder without a session - 401; owner.demo signed in through the studio code flow (password and TOTP), identity on Zitadel - session 200, builder not 503; on 200 - 3 builder tables owned by studio` (profile studio only)
+- `tests/stack/stack_test.sh` — `mascot - healthz 200, readyz model and index ok, other paths 404; German and English question - 200 with a passage of docs/infrastructure.md and its GitHub URL; questions 1-6 - 200, 7th - 429 with Retry-After; forged X-Forwarded-For - still 429; second client - 200; preflight from the public site - allowed, foreign origin - not allowed`
+- `tests/stack/stack_test.sh` — `mascot isolation - one network, internal, members edge and mascot only; no default route; DNS for example.com, github.com, database, bus, telemetry, identity fails; TCP to 4 outside and gateway addresses fails; control: TCP to the edge works`
 - `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` with the profiles `vision`, `vision-s3` and `studio` (published vision image, S3 emulator, file quota 3), and the stack test
 
 ## Changes
@@ -158,3 +173,4 @@ updated: 2026-10-30
 | 2026-10-30 | identity `5e7587f` reads the studio client id for the account delete step-up (volume `studio-client`, read-only); `scripts/zitadel-audience.sh` sets the project id as audience; vision runs its published image `5d15798` instead of a git build; stack test deletes an account with real Zitadel tokens (synthwerk#41, #36). |
 | 2026-10-30 | llm answers CORS on the widget chat routes per app origin (router `llm-widget` without `edge-cors`, `SYNTHWERK_LLM_CORS_ORIGINS`); `/identity/internal/*` is off the edge; identity `dd30bea`, llm `5b5545c` (infra#21 follow-up, synthwerk#34). |
 | 2026-10-30 | vision answers CORS per app origin (`SYNTHWERK_VISION_IDENTITY_URL`, vision `596589c`); llm `d387ad6` bounds its origin lookups; stack test: vision preflights, one allow-origin header, 413 over 1 MiB (infra#24). |
+| 2026-10-30 | Mascot `f2850fb` joins the stack on the isolated network `mascot` behind the edge (synthwerk#48). Studio gets its own database `studio` and role, password from the one-shot `studio-db-secret`; CI builds studio `1ec1f14` (page builder) (synthwerk#107). |
