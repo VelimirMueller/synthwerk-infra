@@ -443,6 +443,22 @@ if tests/stack/issuer.sh active; then
     else
       fail "widget token preflight: no allow-origin for $shop"
     fi
+    # synthwerk-widgets#41: a foreign origin passes the token preflight, and the trade refuses
+    # it with a 403 origin_not_allowed the page can read (no token, no credentials).
+    trade="$EDGE/identity/v1/apps/$app_id/widget-tokens"
+    if [[ "$(allow_origin -X OPTIONS -H 'Origin: https://evil.stack.test' -H 'Access-Control-Request-Method: POST' \
+      -H 'Access-Control-Request-Headers: authorization' "$trade")" == "https://evil.stack.test" ]]; then
+      pass "widget token preflight passes a foreign origin"
+    else
+      fail "widget token preflight: no allow-origin for https://evil.stack.test"
+    fi
+    expect_status "widget token trade from a foreign origin: 403" 403 -X POST -H "Authorization: Bearer $tok_owner" \
+      -H 'Origin: https://evil.stack.test' "$trade"
+    if [[ "$(allow_origin -X POST -H "Authorization: Bearer $tok_owner" -H 'Origin: https://evil.stack.test' "$trade")" == "https://evil.stack.test" ]]; then
+      pass "widget token refusal is readable to the foreign origin"
+    else
+      fail "widget token refusal: no allow-origin for https://evil.stack.test"
+    fi
     wtok=$(curl -s --max-time 10 -X POST -H "Authorization: Bearer $tok_owner" -H "Origin: $shop" -H 'Content-Type: application/json' \
       --data '{}' "$EDGE/identity/v1/apps/$app_id/widget-tokens" | grep -oE '"(token|access_token)": ?"[^"]+"' | head -n 1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
     # Claims only (no signature check here): iss is the widget issuer, origin is bound.
