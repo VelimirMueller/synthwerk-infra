@@ -100,17 +100,33 @@ jobs:
       stack: go
 
   # Every service of the compose stack must turn healthy; then the edge tests run.
+  # The profiles vision, vision-s3 and studio are on: vision with the small MobileNet model,
+  # uploads on the S3 emulator with a file quota of 3, studio built from a pinned commit.
   stack:
     needs: [changes, lint]
     if: ${{ !failure() && !cancelled() && needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      COMPOSE_PROFILES: vision,vision-s3,studio
+      SYNTHWERK_VISION_BACKEND: mobilenet
+      SYNTHWERK_VISION_STORAGE_BACKEND: s3
+      SYNTHWERK_VISION_UPLOAD_QUOTA_FILES: "3"
+      SYNTHWERK_STUDIO_SRC: ./.studio-src
     steps:
       - name: Check out the source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      # synthwerk-studio main d20c277 (label admin, synthwerk#44). Bump the SHA by hand.
+      - name: Check out synthwerk-studio for the studio profile
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VelimirMueller/synthwerk-studio
+          ref: d20c277f29ad0fe739722ab7879655512e72eb2b
+          path: .studio-src
           persist-credentials: false
       - name: Check the shell scripts with bash and shellcheck
         run: |
@@ -123,6 +139,7 @@ jobs:
           docker compose config --quiet
           docker compose --profile ollama config --quiet
           docker compose --profile studio config --quiet
+          docker compose --profile vision --profile vision-s3 config --quiet
       - name: Run the stack test against the whole compose stack
         run: tests/stack/e2e.sh
 

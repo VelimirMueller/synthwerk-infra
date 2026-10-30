@@ -35,7 +35,14 @@ expect_status() {
 
 # One-shot services: they must have exited with code 0, not be healthy.
 # Space on both ends: the loop matches *" $svc "*.
-oneshot=" database-init identity-widget-key zitadel-bootstrap ollama-pull "
+oneshot=" database-init identity-widget-key zitadel-bootstrap ollama-pull vision-admin-token objectstore-bucket "
+
+# setting <name> <default>: a stack setting as compose reads it: the shell first, then .env.
+setting() {
+  local value=${!1:-}
+  [[ -n "$value" ]] || value=$(grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+  printf '%s' "${value:-$2}"
+}
 
 echo "# every default service is running and healthy"
 # "config --services" lists only the services of the active profiles (none by default,
@@ -405,6 +412,89 @@ if tests/stack/issuer.sh active; then
     if [[ "$jwks" == *'"kty":"EC"'* && "$jwks" == *'"crv":"P-256"'* ]]; then pass "widget key set on the edge: one P-256 key"; else fail "widget key set: ${jwks:0:120}"; fi
   fi
 
+  echo "# vision behind the edge (profile vision; synthwerk#36, #44, #76, #77)"
+  if [[ -z "$(docker compose ps -q vision 2>/dev/null)" ]]; then
+    echo "skip: vision is not running (docker compose --profile vision up --build --wait)"
+  elif [[ -z "${wtok:-}" || -z "${shop:-}" ]]; then
+    fail "vision: no widget token to test with (see the widget routes above)"
+  else
+    VISION="$EDGE/vision"
+    # A 64 x 64 PNG gradient, made with the Python standard library only.
+    img=$(mktemp)
+    python3 -c 'import struct, sys, zlib
+w = h = 64
+raw = b"".join(b"\x00" + bytes(v for x in range(w) for v in (x * 4, y * 4, 128)) for y in range(h))
+chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+sys.stdout.buffer.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))' >"$img"
+    form=(-F "image=@$img;type=image/png")
+    vready=$(curl -s --max-time 10 "$VISION/readyz" || true)
+    if [[ "$vready" == *'"name":"model","status":"ok"'* ]]; then pass "vision /readyz on the edge: model loaded"; else fail "vision /readyz: ${vready:0:200}"; fi
+    expect_status "classification without a token: 401" 401 -H "Origin: $shop" "${form[@]}" "$VISION/v1/classifications"
+    expect_status "classification with a forged widget token: 401" 401 -H "Authorization: Bearer ${wtok%.*}.AAAA" \
+      -H "Origin: $shop" "${form[@]}" "$VISION/v1/classifications"
+    # A user token of the test issuer (RS256, no origin claim) is not a widget token.
+    expect_status "classification with a user token: 401" 401 -H "Authorization: Bearer $tok_owner" \
+      -H "Origin: $shop" "${form[@]}" "$VISION/v1/classifications"
+    expect_status "widget token from another origin: 403" 403 -H "Authorization: Bearer $wtok" \
+      -H 'Origin: https://evil.stack.test' "${form[@]}" "$VISION/v1/classifications"
+    out=$(curl -s --max-time 30 -w '\n%{http_code}' -H "Authorization: Bearer $wtok" -H "Origin: $shop" \
+      "${form[@]}" "$VISION/v1/classifications" || true)
+    if [[ "${out##*$'\n'}" == 200 && "$out" == *'"primary":'* ]]; then
+      pass "widget token from $shop: classification 200 through edge and WAF ($(grep -oE '"model":\{"name":"[^"]*"' <<<"$out" | cut -d'"' -f6))"
+    else
+      fail "classification with the widget token: ${out:0:200}"
+    fi
+
+    # Uploads land under the org of the token, in the configured backend, within its quota.
+    backend=$(setting SYNTHWERK_VISION_STORAGE_BACKEND local)
+    quota=$(setting SYNTHWERK_VISION_UPLOAD_QUOTA_FILES 1000)
+    upload() {
+      curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H "Authorization: Bearer $wtok" -H "Origin: $shop" \
+        "${form[@]}" "$VISION/v1/images" || true
+    }
+    code=$(upload)
+    if [[ "$code" == 201 ]]; then pass "widget token: upload 201 ($backend backend)"; else fail "upload with the widget token: $code"; fi
+    stored=1
+    if [[ "$quota" =~ ^[0-9]+$ ]] && ((quota <= 5)); then
+      while ((stored < quota)); do
+        code=$(upload)
+        [[ "$code" == 201 ]] || break
+        stored=$((stored + 1))
+      done
+      code=$(upload)
+      if ((stored == quota)) && [[ "$code" == 507 ]]; then pass "upload past the file quota of the org ($quota): 507"; else fail "file quota $quota: $stored stored, then $code (want 507)"; fi
+    else
+      echo "skip: file quota $quota is too large to fill (set SYNTHWERK_VISION_UPLOAD_QUOTA_FILES to 5 or less)"
+    fi
+    if [[ "$backend" == s3 ]]; then
+      if [[ "$vready" == *'"name":"storage","status":"ok"'* ]]; then pass "vision /readyz: upload bucket reachable"; else fail "vision storage check: ${vready:0:200}"; fi
+      bucket=$(setting SYNTHWERK_VISION_S3_BUCKET vision-uploads)
+      # Listed from the vision container: it is on the network of the emulator.
+      keys=$(docker compose exec -T vision python -c "import urllib.request as r
+print(r.urlopen('http://objectstore:5000/$bucket?list-type=2&prefix=$zorg/', timeout=10).read().decode())" 2>/dev/null \
+        | { grep -oE '<Key>[^<]+</Key>' || true; } | grep -c . || true)
+    else
+      keys=$(docker compose exec -T vision sh -c "find /data/uploads/$zorg -type f -name '*.png' | wc -l" 2>/dev/null | tr -d ' \r' || true)
+    fi
+    if [[ "$keys" == "$stored" ]]; then pass "$stored upload(s) stored under org $zorg ($backend)"; else fail "stored objects under org $zorg: '$keys', want $stored ($backend)"; fi
+
+    # The label admin takes the service token, inside the stack only (synthwerk#44).
+    expect_status "label admin is not on the edge: 404" 404 -H "Authorization: Bearer $wtok" "$VISION/v1/orgs/$zorg/labels"
+    expect_status "runtime labels are not on the edge: 404" 404 "$VISION/v1/labels"
+    # admin_status <token expression>: status of GET /v1/orgs/<org>/labels from inside vision.
+    admin_status() {
+      docker compose exec -T vision sh -c "python -c \"import sys, urllib.request as r, urllib.error as e
+req = r.Request('http://127.0.0.1:8000/v1/orgs/$zorg/labels', headers={'Authorization': 'Bearer ' + sys.argv[1]})
+try: print(r.urlopen(req, timeout=10).status)
+except e.HTTPError as x: print(x.code)\" \"$1\"" 2>/dev/null | tr -d '\r' || true
+    }
+    code=$(admin_status '$(cat /secrets/vision.token)')
+    if [[ "$code" == 200 ]]; then pass "vision label admin with the generated token: 200"; else fail "vision label admin with its token: $code"; fi
+    code=$(admin_status wrong-token)
+    if [[ "$code" == 401 ]]; then pass "vision label admin with a wrong token: 401"; else fail "vision label admin with a wrong token: $code"; fi
+    rm -f "$img"
+  fi
+
   echo "# own-data export (synthwerk#41)"
   export_doc=$(curl -s --max-time 15 -H "Authorization: Bearer $tok_owner" -w '\n%{http_code}' "$EDGE/identity/v1/me/export" || true)
   if [[ "${export_doc##*$'\n'}" == 404 ]]; then
@@ -430,6 +520,17 @@ if [[ -n "$(docker compose ps -q studio 2>/dev/null)" ]]; then
   # The login route redirects to Zitadel only when the server reads the issuer (alias on zitadel).
   loc=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 10 "$STUDIO/api/auth/login" || true)
   if [[ "$loc" == "${SYNTHWERK_ZITADEL_PUBLIC_URL:-$AUTH}/oauth/v2/authorize?"* ]]; then pass "studio login redirects to Zitadel"; else echo "info: studio login redirect '${loc%%\?*}' (sign-in needs the edge on port 8080, see compose.yaml)"; fi
+  expect_status "studio labels without a session: 401" 401 "$STUDIO/api/labels"
+  # The label BFF calls vision with NUXT_VISION_URL and the token file studio/start.mjs reads.
+  # Same call from the studio container: proves the network path and the shared token.
+  if [[ -n "$(docker compose ps -q vision 2>/dev/null)" ]]; then
+    code=$(docker compose exec -T studio node -e "const t = require('node:fs').readFileSync(process.env.VISION_ADMIN_TOKEN_FILE, 'utf8').trim()
+fetch(process.env.NUXT_VISION_URL + '/v1/orgs/stack-org/labels', { headers: { authorization: 'Bearer ' + t } })
+  .then((r) => console.log(r.status), () => console.log('unreachable'))" 2>/dev/null | tr -d '\r' || true)
+    if [[ "$code" == 200 ]]; then pass "studio reaches vision label admin with its token: 200"; else fail "studio to vision label admin: '$code'"; fi
+  else
+    echo "skip: vision is not running, so studio has no label admin to reach"
+  fi
 else
   echo "skip: studio is not running (docker compose --profile studio up --build --wait)"
 fi

@@ -1,13 +1,17 @@
 # Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
-# identity and llm; studio with a profile.
+# identity and llm; vision and studio with a profile.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
 #   docker compose --profile ollama up --wait   # also start Ollama
+#   docker compose --profile vision up --build --wait   # also build and start vision
+#   docker compose --profile vision --profile vision-s3 up --build --wait
+#                                  # vision on the S3 emulator (set SYNTHWERK_VISION_STORAGE_BACKEND=s3)
 #   docker compose --profile studio up --build --wait   # also build and start studio
 #
-# Every image is pinned by tag and digest. Renovate bumps both. Studio has no
-# image yet: the profile builds it from a checkout (studio/Dockerfile).
+# Every image is pinned by tag and digest. Renovate bumps both. Studio and vision have
+# no published image yet: their profiles build them from source (studio/Dockerfile;
+# vision from a pinned commit of synthwerk-vision).
 name: synthwerk
 
 x-hardening: &hardening
@@ -505,8 +509,164 @@ services:
       <<: *healthcheck
       test: ["CMD", "/llm", "healthcheck"]
 
-  # synthwerk-studio (Nuxt BFF): sign-in, health view, apps, users and audit
-  # (synthwerk#37, #38, #40, #95). Profile "studio": synthwerk-studio publishes no image
+  # One-shot: the service token of the vision label admin (synthwerk#44). Made once per
+  # volume at the first start, never in git. .token (root) holds the value; a missing copy
+  # is made from it: vision.token for vision (uid 10001), studio.token for studio
+  # (uid 65532), each mode 0400. Reuses the pinned database image: it only needs a shell.
+  vision-admin-token:
+    profiles: [vision]
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    # CHOWN: each copy belongs to the user of the service that reads it.
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    # $$ = a literal $ for the shell in the container. Prints no value.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        set -eu;
+        umask 077;
+        if [ ! -s /secrets/.token ]; then
+        od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /secrets/.token.new;
+        mv /secrets/.token.new /secrets/.token;
+        rm -f /secrets/vision.token /secrets/studio.token;
+        fi;
+        for pair in vision:10001 studio:65532; do
+        name=$${pair%%:*}; uid=$${pair##*:};
+        [ -s "/secrets/$$name.token" ] && continue;
+        rm -f "/secrets/$$name.token";
+        cp /secrets/.token "/secrets/$$name.token";
+        chmod 0400 "/secrets/$$name.token";
+        chown "$$uid" "/secrets/$$name.token";
+        done
+    volumes:
+      - vision-admin:/secrets
+    network_mode: none
+
+  # synthwerk-vision: image classification for the widgets (synthwerk#36, #44, #76, #77).
+  # Profile "vision": the default SigLIP 2 build fetches about 1.5 GB of weights, too slow
+  # for every "up". synthwerk-vision publishes images only from develop, which it does
+  # not have yet, so compose builds the pinned main commit below (Renovate cannot bump
+  # it: change the SHA in context and COMMIT together). SYNTHWERK_VISION_SRC=../synthwerk-vision
+  # builds a local checkout instead. SYNTHWERK_VISION_BACKEND=mobilenet builds the small
+  # model (14 MB, ImageNet classes; CI uses it). Rebuild after a change: up --build.
+  vision:
+    <<: *hardening
+    profiles: [vision]
+    build:
+      context: ${SYNTHWERK_VISION_SRC:-https://github.com/VelimirMueller/synthwerk-vision.git#5d15798bdd78b77c451e970735aee2a4f37668d7}
+      args:
+        BACKEND: ${SYNTHWERK_VISION_BACKEND:-siglip}
+        COMMIT: 5d15798bdd78b77c451e970735aee2a4f37668d7
+    image: synthwerk-vision:local
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs: [/tmp]
+    # The admin token comes from the file vision-admin-token wrote, so it is in no
+    # compose file and in no process argument. No token file: vision does not start.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        token=$$(cat /secrets/vision.token) && [ -n "$$token" ] || { echo "vision: no admin token in /secrets (run vision-admin-token)" >&2; exit 1; };
+        export SYNTHWERK_VISION_ADMIN_TOKEN="$$token";
+        unset token;
+        exec "$$@"
+      - vision
+    command: [uvicorn, "synthwerk_vision.main:create_app", --factory, --host, 0.0.0.0, --port, "8000", --proxy-headers, --no-access-log]
+    environment:
+      <<: *service-env
+      OTEL_SERVICE_NAME: synthwerk-vision
+      # Widget tokens (synthwerk#76): the issuer is identity's widget issuer; the key set
+      # comes from identity inside the stack. The audience is identity's default.
+      SYNTHWERK_VISION_OIDC_ISSUER: ${SYNTHWERK_VISION_OIDC_ISSUER:-${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}}
+      SYNTHWERK_VISION_JWKS_URL: ${SYNTHWERK_VISION_JWKS_URL:-http://identity:8080/.well-known/jwks.json}
+      SYNTHWERK_VISION_OIDC_AUDIENCE: ${SYNTHWERK_VISION_OIDC_AUDIENCE:-synthwerk-api}
+      # Browser origins vision answers CORS for (JSON list). The token still binds each
+      # call to the origin of its app.
+      SYNTHWERK_VISION_CORS_ORIGINS: ${SYNTHWERK_VISION_CORS_ORIGINS:-["http://localhost:3000","http://localhost:4174","http://localhost:5173"]}
+      # The edge takes at most 1 MiB per request (edge-body-limit), so vision takes no more.
+      SYNTHWERK_VISION_MAX_UPLOAD_BYTES: "1048576"
+      # Uploads (synthwerk#36, #77): local folder in the volume vision-data, or s3.
+      SYNTHWERK_VISION_STORAGE_BACKEND: ${SYNTHWERK_VISION_STORAGE_BACKEND:-local}
+      SYNTHWERK_VISION_UPLOAD_DIR: /data/uploads
+      SYNTHWERK_VISION_DATA_DIR: /data/state
+      SYNTHWERK_VISION_UPLOAD_QUOTA_BYTES: ${SYNTHWERK_VISION_UPLOAD_QUOTA_BYTES:-104857600}
+      SYNTHWERK_VISION_UPLOAD_QUOTA_FILES: ${SYNTHWERK_VISION_UPLOAD_QUOTA_FILES:-1000}
+      SYNTHWERK_VISION_UPLOAD_QUOTA_TOTAL_BYTES: ${SYNTHWERK_VISION_UPLOAD_QUOTA_TOTAL_BYTES:-524288000}
+      # One uvicorn worker, one container.
+      SYNTHWERK_VISION_UPLOAD_WRITERS: ${SYNTHWERK_VISION_UPLOAD_WRITERS:-1}
+      # s3 backend only. Defaults: the emulator of profile vision-s3, which ignores the keys.
+      # A real bucket (Supabase Storage) sets endpoint, region, bucket and both keys in .env.
+      SYNTHWERK_VISION_S3_ENDPOINT: ${SYNTHWERK_VISION_S3_ENDPOINT:-http://objectstore:5000}
+      SYNTHWERK_VISION_S3_REGION: ${SYNTHWERK_VISION_S3_REGION:-us-east-1}
+      SYNTHWERK_VISION_S3_BUCKET: ${SYNTHWERK_VISION_S3_BUCKET:-vision-uploads}
+      SYNTHWERK_VISION_S3_ACCESS_KEY_ID: ${SYNTHWERK_VISION_S3_ACCESS_KEY_ID:-emulator}
+      SYNTHWERK_VISION_S3_SECRET_ACCESS_KEY: ${SYNTHWERK_VISION_S3_SECRET_ACCESS_KEY:-emulator}
+    volumes:
+      - vision-admin:/secrets:ro
+      # Uploads (local backend), runtime labels and corrections.
+      - vision-data:/data
+      # Text embeddings of added labels. The volume starts as a copy of the cache the
+      # build warmed, and stays writable on the read-only root file system.
+      - vision-label-cache:/app/models/label_cache
+    networks: [app]
+    depends_on:
+      vision-admin-token:
+        condition: service_completed_successfully
+      # Only with the vision-s3 profile: the bucket exists before the first upload.
+      objectstore-bucket:
+        condition: service_completed_successfully
+        required: false
+    healthcheck:
+      <<: *healthcheck
+      # /readyz: 200 once the model is loaded (degraded counts as up), 503 while down.
+      start_period: 120s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+
+  # S3 emulator for vision (profile vision-s3, with SYNTHWERK_VISION_STORAGE_BACKEND=s3):
+  # Moto in server mode. Path-style bucket URLs like Supabase Storage. Data in memory only.
+  objectstore:
+    <<: *hardening
+    profiles: [vision-s3]
+    image: motoserver/moto:5.2.4@sha256:120b1589c6df7e35d2092935f6ff724486bb2c4189d0e36ce795baba1400ffd2
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs: [/tmp]
+    networks: [app]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/moto-api/', timeout=2)"]
+
+  # One-shot: the upload bucket on the emulator. Moto takes an unsigned PUT; a rerun keeps it.
+  objectstore-bucket:
+    profiles: [vision-s3]
+    image: motoserver/moto:5.2.4@sha256:120b1589c6df7e35d2092935f6ff724486bb2c4189d0e36ce795baba1400ffd2
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    entrypoint:
+      - python
+      - -c
+      - |
+        import urllib.error, urllib.request as r
+        try:
+            r.urlopen(r.Request('http://objectstore:5000/${SYNTHWERK_VISION_S3_BUCKET:-vision-uploads}', method='PUT'), timeout=10)
+        except urllib.error.HTTPError as err:
+            if err.code != 409:  # 409: the bucket exists already
+                raise
+    networks: [app]
+    depends_on:
+      objectstore:
+        condition: service_healthy
+
+  # synthwerk-studio (Nuxt BFF): sign-in, health view, apps, users, audit and labels
+  # (synthwerk#37, #38, #40, #44, #95). Profile "studio": synthwerk-studio publishes no image
   # yet, so compose builds a checkout (SYNTHWERK_STUDIO_SRC, default ../synthwerk-studio).
   # Open http://localhost:3001 (SYNTHWERK_STUDIO_PORT); Grafana keeps :3000.
   # Sign-in needs the default edge port 8080: the server calls the issuer URL
@@ -544,8 +704,14 @@ services:
       # server by default) and the edge the widget calls.
       NUXT_PUBLIC_WIDGET_SCRIPT_URL: ${SYNTHWERK_STUDIO_WIDGET_SCRIPT_URL:-http://localhost:4174/dist/synthwerk-chat.js}
       NUXT_PUBLIC_WIDGET_API_URL: http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}
+      # Label admin (synthwerk#44): vision inside the stack and its service token, read by
+      # studio/start.mjs from the file vision-admin-token wrote. Without the vision profile
+      # the file is missing and /api/labels answers 503.
+      NUXT_VISION_URL: http://vision:8000
+      VISION_ADMIN_TOKEN_FILE: /vision/studio.token
     volumes:
       - studio-client:/studio:ro
+      - vision-admin:/vision:ro
     ports:
       - "127.0.0.1:${SYNTHWERK_STUDIO_PORT:-3001}:3000"
     # "edge" for the published port; "app" for Zitadel, identity and pulse.
@@ -557,6 +723,10 @@ services:
         condition: service_healthy
       pulse:
         condition: service_healthy
+      # Only with the vision profile: the token file must exist before studio reads it.
+      vision-admin-token:
+        condition: service_completed_successfully
+        required: false
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "node", "/app/start.mjs", "healthcheck"]
@@ -646,3 +816,10 @@ volumes:
   identity-keys: {}
   # Studio OIDC client (id and secret). zitadel-bootstrap writes, studio reads.
   studio-client: {}
+  # Service token of the vision label admin (synthwerk#44). vision-admin-token writes,
+  # vision and studio read their own copy. Holds a secret: never copy it out of the stack.
+  vision-admin: {}
+  # Vision uploads (local backend), runtime labels and corrections.
+  vision-data: {}
+  # Vision text embeddings of added labels.
+  vision-label-cache: {}
