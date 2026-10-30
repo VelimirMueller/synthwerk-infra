@@ -338,9 +338,9 @@ services:
       # Action target for identity (#28 task 5). Zitadel resolves the name when it
       # saves the target, so identity must be up on zitadel-hooks first.
       SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: http://identity-hooks:8081/internal/zitadel/actions
-      # Server-side MFA gate (synthwerk#94, ADR-0002 option C). Off until the pinned
-      # identity image has the gate routes: with an older image every sign-in fails.
-      SYNTHWERK_ZITADEL_MFA_GATE: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
+      # Server-side MFA gate (synthwerk#94, ADR-0004). On by default: the pinned identity
+      # image has the gate routes. With an identity image older than #94 every sign-in fails.
+      SYNTHWERK_ZITADEL_MFA_GATE: ${SYNTHWERK_ZITADEL_MFA_GATE:-true}
       # Mail (invite codes, email verification) goes to Mailpit in local and ci (D-49).
       # Dev and prd set this to empty and keep their provider (Resend) out of the bootstrap.
       SYNTHWERK_ZITADEL_SMTP_HOST: ${SYNTHWERK_ZITADEL_SMTP_HOST-mailpit:1025}
@@ -530,7 +530,7 @@ services:
       NUXT_OIDC_POST_LOGOUT_REDIRECT_URI: http://localhost:${SYNTHWERK_STUDIO_PORT:-3001}/
       # Same switch as the server-side gate: studio refuses tokens without mfa only
       # when Zitadel puts amr into them (synthwerk#94).
-      NUXT_OIDC_REQUIRE_MFA: ${SYNTHWERK_ZITADEL_MFA_GATE:-false}
+      NUXT_OIDC_REQUIRE_MFA: ${SYNTHWERK_ZITADEL_MFA_GATE:-true}
       # Not required here: a stale .env must not break "up" without the profile. Empty =
       # studio answers 500 (NUXT_SESSION_SECRET must be set) and stays unhealthy;
       # scripts/init-env.sh appends a generated value.
