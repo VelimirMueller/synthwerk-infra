@@ -372,6 +372,52 @@ if tests/stack/issuer.sh active; then
   if [[ -n "$kept" && "$code" == 403 ]]; then pass "identity-sync cannot delete a platform-org user: 403"; else fail "delete in the platform org: user '$kept', status $code"; fi
   [[ -n "$kept" ]] && zapi DELETE "/v2/users/$kept" - >/dev/null
 
+  echo "# invites and grant status from Zitadel (synthwerk#37)"
+  # identity reads the project id from the file zitadel-bootstrap writes after identity starts.
+  pid=$(docker run --rm -v synthwerk_zitadel-hooks:/h:ro --entrypoint cat curlimages/curl:8.17.0 /h/project-id 2>/dev/null || true)
+  if [[ -n "$project" && "$pid" == "$project" ]]; then pass "bootstrap writes the project id for identity"; else fail "project id file '$pid', project '$project'"; fi
+  invite_to="invited.stack.$$@example.test"
+  expect_status "owner invites a new email: 202" 202 -X POST -H "Authorization: Bearer $tok_owner" \
+    -H 'Content-Type: application/json' --data "{\"email\":\"$invite_to\",\"role\":\"member\"}" "$members"
+  mails=0
+  for _ in $(seq 1 20); do
+    mails=$(curl -s --max-time 5 "http://127.0.0.1:${SYNTHWERK_MAILPIT_UI_PORT:-8025}/api/v1/search?query=to%3A$invite_to" | grep -o '"messages_count":[0-9]*' | cut -d: -f2 || echo 0)
+    ((${mails:-0} >= 1)) && break
+    sleep 3
+  done
+  if ((${mails:-0} >= 1)); then pass "invite mail from identity is in Mailpit"; else fail "no invite mail in Mailpit for $invite_to"; fi
+  rows=$(isql "SELECT count(*) FROM identity.invitations i JOIN identity.memberships m ON m.org_id = i.org_id AND m.user_sub = i.user_sub
+    WHERE i.org_id = '$org_id' AND i.email = '$invite_to' AND m.status = 'invited' AND i.accepted_at IS NULL")
+  if [[ "$rows" == 1 ]]; then pass "invitation pending, invitee row invited"; else fail "invitation rows: $rows, want 1"; fi
+  # wait_status <status>: poll the member row of member_id until it has <status>; prints the last status.
+  wait_status() {
+    local st=""
+    for _ in $(seq 1 30); do
+      st=$(isql "SELECT status FROM identity.memberships WHERE org_id = '$org_id' AND user_sub = '$member_id'")
+      [[ "$st" == "$1" ]] && break
+      sleep 2
+    done
+    echo "$st"
+  }
+  audit_status() {
+    isql "SELECT count(*) FROM identity.audit_events WHERE org_id = '$org_id' AND type = 'dev.synthwerk.identity.member.$1.v1'
+      AND subject = '$member_id' AND actor = 'system'"
+  }
+  expect_status "active member reads the org: 200" 200 -H "Authorization: Bearer $tok_member" "$EDGE/identity/v1/orgs/$org_id"
+  zapi POST "/management/v1/users/$member_id/grants/$mgrant/_deactivate" "$zorg" '{}' >/dev/null
+  st=$(wait_status deactivated)
+  if [[ "$st" == deactivated ]]; then pass "grant deactivated in Zitadel: member deactivated in identity"; else fail "member status after deactivate: '$st'"; fi
+  rows=$(audit_status deactivated)
+  if [[ "$rows" == 1 ]]; then pass "one member.deactivated by system in the audit list"; else fail "member.deactivated audit rows: $rows, want 1"; fi
+  expect_status "deactivated member reads the org: 404" 404 -H "Authorization: Bearer $tok_member" "$EDGE/identity/v1/orgs/$org_id"
+  expect_status "deactivated member lists members: 404" 404 -H "Authorization: Bearer $tok_member" "$members"
+  zapi POST "/management/v1/users/$member_id/grants/$mgrant/_reactivate" "$zorg" '{}' >/dev/null
+  st=$(wait_status active)
+  if [[ "$st" == active ]]; then pass "grant reactivated in Zitadel: member active again"; else fail "member status after reactivate: '$st'"; fi
+  rows=$(audit_status reactivated)
+  if [[ "$rows" == 1 ]]; then pass "one member.reactivated by system in the audit list"; else fail "member.reactivated audit rows: $rows, want 1"; fi
+  expect_status "reactivated member reads the org: 200" 200 -H "Authorization: Bearer $tok_member" "$EDGE/identity/v1/orgs/$org_id"
+
   echo "# apps and widget routes on the edge (synthwerk#30, #38)"
   apps="$EDGE/identity/v1/orgs/$org_id/apps"
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Authorization: Bearer $tok_owner" "$apps" || true)

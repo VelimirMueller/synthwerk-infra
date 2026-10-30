@@ -60,6 +60,12 @@ type Config struct {
 	// owner IdentityHookKeyOwner). identity writes org role changes to Zitadel user
 	// grants with it (synthwerk#29). Set up together with the hook.
 	IdentityPATFile string
+	// IdentityProjectIDFile receives the id of the project synthwerk-api (mode 0444,
+	// no secret) in the volume zitadel-hooks. identity starts before the bootstrap
+	// makes the project, so compose cannot pass the id; identity reads this file
+	// (SYNTHWERK_IDENTITY_ZITADEL_PROJECT_ID_FILE, synthwerk#37). Set up together
+	// with the hook.
+	IdentityProjectIDFile string
 	// IdentityPATLifetime is the lifetime of a new identity-sync PAT. Default 30 days.
 	IdentityPATLifetime time.Duration
 	// MFAGate turns on the server-side MFA gate (synthwerk#94, ADR-0002 option C):
@@ -105,13 +111,14 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		IdentityHookURL:     getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL"),
 		IdentityHookKeyFile: or(getenv("SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE"), "/zitadel/hooks/identity-signing.key"),
 		// 65532: nonroot in the distroless image of synthwerk-identity.
-		IdentityHookKeyOwner: 65532,
-		IdentityPATFile:      or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE"), "/zitadel/hooks/identity.pat"),
-		IdentityPATLifetime:  30 * 24 * time.Hour,
-		MFAGateKeyFile:       or(getenv("SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE"), "/zitadel/hooks/identity-mfa-gate.key"),
-		TokenClaimsKeyFile:   or(getenv("SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE"), "/zitadel/hooks/identity-token-claims.key"),
-		SMTPHost:             getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
-		SMTPSender:           or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
+		IdentityHookKeyOwner:  65532,
+		IdentityPATFile:       or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE"), "/zitadel/hooks/identity.pat"),
+		IdentityPATLifetime:   30 * 24 * time.Hour,
+		IdentityProjectIDFile: or(getenv("SYNTHWERK_ZITADEL_IDENTITY_PROJECT_ID_FILE"), "/zitadel/hooks/project-id"),
+		MFAGateKeyFile:        or(getenv("SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE"), "/zitadel/hooks/identity-mfa-gate.key"),
+		TokenClaimsKeyFile:    or(getenv("SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE"), "/zitadel/hooks/identity-token-claims.key"),
+		SMTPHost:              getenv("SYNTHWERK_ZITADEL_SMTP_HOST"),
+		SMTPSender:            or(getenv("SYNTHWERK_ZITADEL_SMTP_SENDER"), "auth@synthwerk.localhost"),
 	}
 	switch v := getenv("SYNTHWERK_ZITADEL_MFA_GATE"); v {
 	case "", "false":
@@ -200,6 +207,9 @@ func Run(ctx context.Context, c *Client, cfg Config, log *slog.Logger) (Result, 
 	}
 	if cfg.IdentityHookURL != "" {
 		steps = append(steps, struct {
+			name string
+			fn   func() error
+		}{"identity project id", func() error { return writeProjectID(cfg.IdentityProjectIDFile, r.ProjectID) }}, struct {
 			name string
 			fn   func() error
 		}{"identity hook", func() error { return ensureIdentityHook(ctx, c, cfg) }}, struct {
@@ -632,8 +642,13 @@ func or(v, def string) string {
 const IdentityHookTarget = "identity-user-created"
 
 // HookEvents are the Zitadel events identity receives (zitadelhook in synthwerk-identity):
-// new users (#28) and the user grants it mirrors as org memberships (#29).
-var HookEvents = []string{"user.human.added", "user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed"}
+// new users (#28), the user grants it mirrors as org memberships (#29) and the
+// deactivate and reactivate of a grant, which set the member status (#37).
+var HookEvents = []string{
+	"user.human.added",
+	"user.grant.added", "user.grant.changed", "user.grant.removed", "user.grant.cascade.removed",
+	"user.grant.deactivated", "user.grant.reactivated",
+}
 
 // IdentitySyncUser is the machine user identity calls Zitadel with.
 const IdentitySyncUser = "identity-sync"
@@ -758,6 +773,18 @@ func mintIdentityPAT(ctx context.Context, c *Client, cfg Config, orgID, userID s
 		return "", err
 	}
 	return pat.TokenID, nil
+}
+
+// writeProjectID writes the project id for identity (synthwerk#37). An unchanged
+// file is not written again.
+func writeProjectID(path, projectID string) error {
+	if projectID == "" {
+		return errors.New("no project id")
+	}
+	if b, err := os.ReadFile(path); err == nil && string(b) == projectID { //nolint:gosec // G304: path from our own config
+		return nil
+	}
+	return writePublic(path, projectID)
 }
 
 // writePublic writes a non-secret file (0444, owner root) through a temp file.

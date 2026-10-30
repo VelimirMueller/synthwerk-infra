@@ -602,6 +602,7 @@ func hookSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
 	cfg.IdentityHookKeyFile = filepath.Join(t.TempDir(), "identity-signing.key")
 	cfg.IdentityHookKeyOwner = os.Getuid() // tests run unprivileged
 	cfg.IdentityPATFile = filepath.Join(t.TempDir(), "identity.pat")
+	cfg.IdentityProjectIDFile = filepath.Join(t.TempDir(), "project-id")
 	return f, c, cfg
 }
 
@@ -777,6 +778,43 @@ func TestIdentityHookIsSetUpOnce(t *testing.T) {
 	}
 }
 
+func TestIdentityHookGetsGrantStatusEvents(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	run(t, c, cfg)
+	for _, ev := range []string{"user.grant.deactivated", "user.grant.reactivated"} {
+		if !slices.Contains(bootstrap.HookEvents, ev) || len(f.execs["event:"+ev]) != 1 {
+			t.Errorf("execution %s -> %v, want the identity target", ev, f.execs["event:"+ev])
+		}
+	}
+}
+
+func TestIdentityProjectIDFileIsWrittenOnce(t *testing.T) {
+	f, c, cfg := hookSetup(t)
+	r := run(t, c, cfg)
+	got, err := os.ReadFile(cfg.IdentityProjectIDFile)
+	if err != nil || r.ProjectID == "" || string(got) != r.ProjectID {
+		t.Fatalf("project id file %q, %v, want %q", got, err, r.ProjectID)
+	}
+	st, err := os.Stat(cfg.IdentityProjectIDFile)
+	if err != nil || st.Mode().Perm() != 0o444 {
+		t.Fatalf("project id file mode %v, %v, want 0444", st.Mode().Perm(), err)
+	}
+	f.calls = nil
+	run(t, c, cfg)
+	if st2, _ := os.Stat(cfg.IdentityProjectIDFile); !st2.ModTime().Equal(st.ModTime()) {
+		t.Error("second run wrote the unchanged project id file again")
+	}
+}
+
+func TestNoProjectIDFileWithoutHookURL(t *testing.T) {
+	_, c, cfg := setup(t, map[string]string{})
+	cfg.IdentityProjectIDFile = filepath.Join(t.TempDir(), "project-id")
+	run(t, c, cfg)
+	if _, err := os.Stat(cfg.IdentityProjectIDFile); !os.IsNotExist(err) {
+		t.Errorf("project id file without SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL: %v", err)
+	}
+}
+
 func TestIdentityHookFollowsANewURL(t *testing.T) {
 	f, c, cfg := hookSetup(t)
 	run(t, c, cfg)
@@ -863,12 +901,13 @@ func gateSetup(t *testing.T) (*fake, *bootstrap.Client, bootstrap.Config) {
 	t.Helper()
 	dir := t.TempDir()
 	f, c, cfg := setup(t, map[string]string{
-		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL":      "http://identity-hooks:8081/internal/zitadel/actions",
-		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE": filepath.Join(dir, "identity-signing.key"),
-		"SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE":      filepath.Join(dir, "identity.pat"),
-		"SYNTHWERK_ZITADEL_MFA_GATE":               "true",
-		"SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE":      filepath.Join(dir, "identity-mfa-gate.key"),
-		"SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE":  filepath.Join(dir, "identity-token-claims.key"),
+		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_URL":        "http://identity-hooks:8081/internal/zitadel/actions",
+		"SYNTHWERK_ZITADEL_IDENTITY_HOOK_KEY_FILE":   filepath.Join(dir, "identity-signing.key"),
+		"SYNTHWERK_ZITADEL_IDENTITY_PAT_FILE":        filepath.Join(dir, "identity.pat"),
+		"SYNTHWERK_ZITADEL_IDENTITY_PROJECT_ID_FILE": filepath.Join(dir, "project-id"),
+		"SYNTHWERK_ZITADEL_MFA_GATE":                 "true",
+		"SYNTHWERK_ZITADEL_MFA_GATE_KEY_FILE":        filepath.Join(dir, "identity-mfa-gate.key"),
+		"SYNTHWERK_ZITADEL_TOKEN_CLAIMS_KEY_FILE":    filepath.Join(dir, "identity-token-claims.key"),
 	})
 	cfg.IdentityHookKeyOwner = os.Getuid()
 	return f, c, cfg
