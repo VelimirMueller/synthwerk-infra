@@ -458,12 +458,13 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop dd30bea (deploy.yml; MFA gate, widget tokens, audit of
+  # Image from synthwerk-identity develop b943c91 (deploy.yml; MFA gate, widget tokens, audit of
   # llm AI settings, project id file and grant status events, account delete with the ID
-  # token step-up, synthwerk#41, internal widget origin lookup for llm), pinned by digest.
+  # token step-up, synthwerk#41, internal widget origin lookup for llm, readable widget token
+  # refusal and bidi-free greeting, synthwerk-widgets#41), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:dd30bea3dbd8c892a12edaacb05e697976f8c8fe@sha256:6a94a8aa52b3c905924a507545f001827dddfda2a76bdcd14b5442f7c7a1d625
+    image: ghcr.io/velimirmueller/synthwerk-identity:b943c9103ebb70bdc00caef2a6ffe1453a296724@sha256:240c1d8bb3fa3a38e15a99bfda5abce405ec17a18fa0f8347893d0d9b9292399
     read_only: true
     cap_drop: [ALL]
     environment:
