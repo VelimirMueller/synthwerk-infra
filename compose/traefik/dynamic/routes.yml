@@ -76,6 +76,17 @@ http:
       middlewares: [edge-secure, strip-service-prefix]
       service: mascot
 
+    # widgets (synthwerk-widgets#32): the embed bundles for customer sites. No sign-in,
+    # GET and HEAD only: any other method matches no router and gets 404. The path keeps
+    # its /widgets prefix, because the widget host serves /widgets/v<X.Y.Z>/<file>. It
+    # sends its own Access-Control-Allow-Origin "*" (a module script with SRI loads
+    # cross-origin only with it), so edge-cors stays off. WAF, rate limit and body limit stay.
+    widgets:
+      rule: PathRegexp(`^/widgets/v[0-9]+\.[0-9]+\.[0-9]+/synthwerk-(chat|vision)\.js$`) && (Method(`GET`) || Method(`HEAD`))
+      entryPoints: [web]
+      middlewares: [edge-secure]
+      service: widgets
+
     # Zitadel on its own host (D-42). The rule is a template: the host comes from
     # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
     # Templating: the Traefik file provider renders Go templates (with Sprig) in
@@ -150,6 +161,11 @@ http:
       loadBalancer:
         servers:
           - url: http://mascot:8000
+
+    widgets:
+      loadBalancer:
+        servers:
+          - url: http://widgets:8080
 
     # The Zitadel API speaks gRPC and HTTP/1.1 on one port without TLS: h2c.
     zitadel:

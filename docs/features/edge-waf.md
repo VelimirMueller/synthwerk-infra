@@ -8,7 +8,7 @@ paths: ["waf/**", "cmd/waf/**", "compose/traefik/**"]
 api: []
 events: []
 mcp: []
-updated: 2026-10-29
+updated: 2026-11-16
 ---
 
 # Edge WAF and rate limit
@@ -73,3 +73,4 @@ updated: 2026-10-29
 | 2026-10-21 | First version. Coraza as a forwardAuth service (ADR-0001). |
 | 2026-10-28 | Exclusions for Zitadel login UI v2 and the OIDC redirect arguments (synthwerk#28). |
 | 2026-10-29 | The collector truncates client IPs in spans before export (#3). |
+| 2026-11-16 | Router `widgets`: GET and HEAD only on the embed bundle paths, chain `edge-secure`, no prefix strip, no `edge-cors`. Other methods match no router: 404 (synthwerk-widgets#32). |

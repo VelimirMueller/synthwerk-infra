@@ -8,7 +8,7 @@ paths: ["compose.yaml", "compose/**", "scripts/**", ".env.example", "waf/**", "z
 api: []
 events: []
 mcp: []
-updated: 2026-10-30
+updated: 2026-11-16
 ---
 
 # Local stack
@@ -20,6 +20,7 @@ updated: 2026-10-30
 > - `docker compose --profile studio up --build --wait` also builds and starts studio from a synthwerk-studio checkout, at `http://localhost:3001`.
 > - `docker compose --profile vision up --wait` also starts vision (published image) at `/vision` on the edge. It takes widget tokens from identity.
 > - The mascot (public helper, synthwerk#48) answers at `/mascot/v1/answers` without sign-in. Its only network is shared with the edge and has no route out.
+> - The widget host (synthwerk-widgets#32) serves the embed bundles at `/widgets/v<X.Y.Z>/synthwerk-chat.js` and `synthwerk-vision.js`. No sign-in, cached for a year, loadable from any origin.
 > - Studio has its own Postgres database `studio` and role `studio` for the page builder (synthwerk#107). The password is made in a volume at the first start.
 > - Studio relays its page builder events to the stream `EVT_STUDIO` with its own NATS user `studio`; identity shows them in the org audit list (synthwerk#106).
 
@@ -67,6 +68,10 @@ updated: 2026-10-30
 - The mascot's only network is `mascot`: internal, gateway mode `isolated` (the host bridge has no address there), subnet `172.31.251.0/29`. Only the edge (`172.31.251.2`) and the mascot (`172.31.251.3`) are on it. The mascot has no default route, no DNS for outside or stack names, no database, no bus and no telemetry export.
 - The edge routes only `/mascot/v1/answers`, `/mascot/healthz` and `/mascot/readyz` (router `mascot`, chain `edge-secure`, no `edge-cors`). The mascot answers CORS itself for `SYNTHWERK_MASCOT_CORS_ORIGINS` (JSON list; default `["http://localhost:3000","http://localhost:3001"]`, the studio public routes).
 - `FORWARDED_ALLOW_IPS=172.31.251.2`: uvicorn takes the client address from `X-Forwarded-For` only from the edge. The edge does not trust incoming `X-Forwarded-*` headers, so the mascot limit (6 questions per client a minute, 60 for all) counts real clients. A forged `X-Forwarded-For` changes nothing.
+- Starts the widget host (synthwerk-widgets#32): unprivileged nginx on the network `app`, read-only root, no capabilities, 64 MB. It serves only `/widgets/v<X.Y.Z>/synthwerk-chat.js`, `/widgets/v<X.Y.Z>/synthwerk-vision.js` and `/healthz`.
+- The widget host sends `Content-Type: text/javascript`, `Cache-Control: public, max-age=31536000, immutable`, `Access-Control-Allow-Origin: *`, `Cross-Origin-Resource-Policy: cross-origin` and `X-Content-Type-Options: nosniff`. A 404 gets no cache header.
+- The edge routes only GET and HEAD on the two bundle paths (router `widgets`, chain `edge-secure`, no `edge-cors`, prefix kept). Every other method or path gets 404. The WAF checks every request.
+- Compose pins the published widget host image by digest (v0.3.0, synthwerk-widgets `ef53c2d`). It serves only released bundles, checked against their SRI hash at build time. A new release needs a new pin.
 - Studio page builder database (synthwerk#107): `database-init` creates the role `studio` and the database `studio` (owner `studio`). Only `studio` may connect to it; `studio` may not connect to `synthwerk` or `zitadel`. Studio runs its own migrations on the first builder call, in the schema `public`.
 - Studio relay to the bus (synthwerk#106): studio connects to `bus` as NATS user `studio` (`SYNTHWERK_NATS_STUDIO_PASSWORD`, made by `scripts/init-env.sh`). `compose/nats/nats.conf` lets that user only publish to `evt.studio.>` and subscribe to its own replies on `_INBOX_studio.>`. It cannot create or change `EVT_STUDIO` and cannot read other replies on `_INBOX.>`.
 - The one-shot `bus-init` (nats-box, shared user) creates or updates every stream in `compose/nats/streams/` on each `up`: `EVT_STUDIO` (`evt.studio.>`, file, 30 days, duplicate window 2 min). Studio starts after it.
@@ -103,6 +108,8 @@ updated: 2026-10-30
 | Vision quotas in the stack | 100 MiB and 1000 files per org, 500 MiB for all orgs (`.env.example`). CI: 3 files per org. |
 | Vision admin token | Made once per volume `vision-admin`; `docker compose down --volumes` makes a new one. |
 | Studio database password | Made once per volume `studio-db`; `database-init` applies it on every `up`. To rotate: delete the volume `studio-db` (or its files) and run `up` again. |
+| Widget host image | `ghcr.io/velimirmueller/synthwerk-widgets` pinned by digest (v0.3.0). amd64 only. |
+| Widget bundle cache | `max-age=31536000, immutable`: the bytes behind a versioned path never change. A new bundle needs a new version. |
 | Mascot rate limit | 6 questions per client a minute, 60 for all clients (mascot defaults). Over the limit: 429 with `Retry-After`. |
 | Widget key | Made once per volume; `docker compose down --volumes` makes a new key (widget tokens issued before fail). |
 | New images and older images | The pinned images have the routes of synthwerk#30, #38, #40 and #41. An older image ignores the new variables, and the stack test skips those checks with a `skip:` line. |
@@ -156,6 +163,7 @@ updated: 2026-10-30
 - `tests/stack/stack_test.sh` — `page builder events - EVT_STUDIO exists; builder-check creates a page as owner.demo, publishes it twice and rolls it back; studio relays the 4 events (relayed_at, no relay_error); identity audit list holds created, published, published, rolled_back in order; roll back row has the owner as actor, version 1 after 2; no page text; a second relay of the same rows adds no audit row` (profile studio only)
 - `tests/stack/stack_test.sh` — `NATS least privilege - studio may not subscribe to _INBOX.>, update EVT_STUDIO or publish outside evt.studio.>; identity may not subscribe to _INBOX.> or create another durable on EVT_STUDIO, but reads its own; EVT_STUDIO keeps its subjects`
 - `tests/stack/stack_test.sh` — `studio builder database - start.mjs connects as role studio to database studio, may create; password in the volume, not in .env or compose.yaml; role studio - no connect to synthwerk; builder without a session - 401; owner.demo signed in through the studio code flow (password and TOTP), identity on Zitadel - session 200, builder not 503; on 200 - 3 builder tables owned by studio` (profile studio only)
+- `tests/stack/stack_test.sh` — `widgets - each bundle 200 with the five host headers once, same bytes through the edge; HEAD 200; POST and OPTIONS 404; unknown version 404 without a cache header; /widgets/healthz 404; SQL injection 403`
 - `tests/stack/stack_test.sh` — `mascot - healthz 200, readyz model and index ok, other paths 404; German and English question - 200 with a passage of docs/infrastructure.md and its GitHub URL; questions 1-6 - 200, 7th - 429 with Retry-After; forged X-Forwarded-For - still 429; second client - 200; preflight from the public site - allowed, foreign origin - not allowed`
 - `tests/stack/stack_test.sh` — `mascot isolation - one network, internal, members edge and mascot only; no default route; DNS for example.com, github.com, database, bus, telemetry, identity fails; TCP to 4 outside and gateway addresses fails; control: TCP to the edge works`
 - `.github/workflows/ci.yml` job `stack` — `docker compose up --wait` with the profiles `vision`, `vision-s3` and `studio` (published vision image, S3 emulator, file quota 3), and the stack test
@@ -185,3 +193,4 @@ updated: 2026-10-30
 | 2026-10-30 | llm `0b560c1`: fallback provider chain per alias, fall-over before the first token only, circuit breaker per provider, non-EU providers only with `SYNTHWERK_LLM_ALLOW_NON_EU=true` (synthwerk#56). The stack sets no fallback, so llm runs the primary alone. |
 | 2026-10-30 | Studio relays its builder events to `EVT_STUDIO` with the restricted NATS user `studio`; identity `46439b3` copies them to the audit list; CI builds studio `41f90ac`; stack test proves publish and roll back reach the audit list (synthwerk#106). |
 | 2026-10-30 | Studio relays its builder events to `EVT_STUDIO` with the NATS user `studio` (publish `evt.studio.>`, replies on `_INBOX_studio` only); `bus-init` creates the stream; identity `e0a9351` reads it as NATS user `identity` (own durables only) into the audit list; CI builds studio `8045a81`; stack test proves publish and roll back reach the audit list and the refusals (synthwerk#106). |
+| 2026-11-16 | Widget host `widgets` behind the edge: route `widgets` for GET and HEAD on the chat and vision bundles under `/widgets/v<X.Y.Z>/`, pulse target `widgets`. Image v0.3.0 pinned by digest. Stack test: the five host headers once each, same bytes through the edge, POST and OPTIONS 404, WAF 403 (synthwerk-widgets#32). |

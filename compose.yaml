@@ -1,5 +1,5 @@
 # Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
-# identity, llm and the mascot; vision and studio with a profile.
+# identity, llm, the mascot and the widget host; vision and studio with a profile.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -10,7 +10,8 @@
 #   docker compose --profile studio up --build --wait   # also build and start studio
 #
 # Every image is pinned by tag and digest. Renovate bumps both. Studio has no
-# published image yet: its profile builds it from source (studio/Dockerfile).
+# published image yet: its profile builds it from source (studio/Dockerfile). The widget
+# host is built from a pinned synthwerk-widgets commit until its first release.
 name: synthwerk
 
 x-hardening: &hardening
@@ -657,6 +658,23 @@ services:
       # /readyz: 200 once the model and the index are loaded, 503 before.
       start_period: 60s
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+
+  # Widget host (synthwerk-widgets#32): unprivileged nginx serves the embed bundles under
+  # /widgets/v<X.Y.Z>/ with the immutable cache and cross-origin headers; edge route "widgets".
+  # Static files only: no database, no bus, no telemetry, no egress.
+  widgets:
+    <<: *hardening
+    # synthwerk-widgets v0.3.0 (releases.json), published by deploy.yml from develop.
+    image: ghcr.io/velimirmueller/synthwerk-widgets:ef53c2d2944a3ab788b9e27aa8041fdb33e82560@sha256:a6b9ee9ee2460d50775ab04a1af87ef8ac1a5d9d8a0692a6323cabb6a608adef
+    read_only: true
+    cap_drop: [ALL]
+    # nginx writes its pid and temp files here.
+    tmpfs: [/tmp]
+    mem_limit: 64m
+    networks: [app]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
 
   # One-shot: the service token of the vision label admin (synthwerk#44). Made once per
   # volume at the first start, never in git. .token (root) holds the value; a missing copy
