@@ -845,6 +845,13 @@ refused "identity may not create another durable on EVT_STUDIO" Publish '$JS.API
 out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD --inbox-prefix _INBOX_identity \
   req '$JS.API.CONSUMER.INFO.EVT_STUDIO.identity-studio-pages' '')
 if grep -q '"name": *"identity-studio-pages"' <<<"$out"; then pass "identity reads its own durable identity-studio-pages"; else fail "identity durable info: ${out:0:200}"; fi
+# synthwerk#53: the tool call durable on EVT_LLM is allowed (answer, maybe "not found"), never a violation.
+out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD --inbox-prefix _INBOX_identity \
+  req '$JS.API.CONSUMER.INFO.EVT_LLM.identity-llm-toolcalls' '')
+if [[ -n "$out" ]] && ! grep -q "Permissions Violation" <<<"$out"; then pass "identity may read its durable identity-llm-toolcalls"; else fail "identity toolcall durable: ${out:0:200}"; fi
+out=$(nats_as identity SYNTHWERK_NATS_IDENTITY_PASSWORD --inbox-prefix _INBOX_identity \
+  req '$JS.API.CONSUMER.CREATE.EVT_LLM.other' '{"stream_name":"EVT_LLM","config":{"durable_name":"other","ack_policy":"explicit"}}')
+refused "identity may not create another durable on EVT_LLM" Publish '$JS.API.CONSUMER.CREATE.EVT_LLM.other' "$out"
 cfg=$(docker compose exec -T bus wget -q -O - 'http://127.0.0.1:8222/jsz?streams=true&config=true' 2>/dev/null || true)
 subjects=$(python3 -c 'import json, sys
 d = json.load(sys.stdin)
