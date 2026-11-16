@@ -662,18 +662,10 @@ services:
   # Widget host (synthwerk-widgets#32): unprivileged nginx serves the embed bundles under
   # /widgets/v<X.Y.Z>/ with the immutable cache and cross-origin headers; edge route "widgets".
   # Static files only: no database, no bus, no telemetry, no egress.
-  # Until the first release: built from synthwerk-widgets 4667cc3 (PR #47) with SOURCE=source,
-  # so the image builds the bundles from that commit and serves them as v0.3.0. Swap to
-  # ghcr.io/velimirmueller/synthwerk-widgets:<sha>@sha256:<digest> from deploy.yml once
-  # releases.json lists v0.3.0; that image serves only released, hash-checked bundles.
   widgets:
     <<: *hardening
-    build:
-      context: https://github.com/VelimirMueller/synthwerk-widgets.git#4667cc321d6c276ef958092b45e434195cbe1f39
-      args:
-        SOURCE: source
-        COMMIT: 4667cc321d6c276ef958092b45e434195cbe1f39
-    image: synthwerk-widgets:local
+    # synthwerk-widgets v0.3.0 (releases.json), published by deploy.yml from develop.
+    image: ghcr.io/velimirmueller/synthwerk-widgets:ef53c2d2944a3ab788b9e27aa8041fdb33e82560@sha256:a6b9ee9ee2460d50775ab04a1af87ef8ac1a5d9d8a0692a6323cabb6a608adef
     read_only: true
     cap_drop: [ALL]
     # nginx writes its pid and temp files here.
