@@ -99,6 +99,10 @@ var TestUsers = []TestUser{
 }
 
 // ConfigFromEnv reads SYNTHWERK_ZITADEL_* settings. getenv is os.Getenv in production.
+// testUserEnvs are the SYNTHWERK_PLATFORM_ENV values that may create test users.
+// Empty counts as local: compose and the tests default to local.
+var testUserEnvs = []string{"", "local", "ci"}
+
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		StudioRedirectURIs:  list(getenv("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS"), "http://localhost:3000/api/auth/callback"),
@@ -133,6 +137,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_IDENTITY_PAT_LIFETIME %q: want a duration of at least 1h", v)
 		}
 		cfg.IdentityPATLifetime = d
+	}
+	// Test users (operator.test with the operator role) exist in local and ci only. A dev or
+	// prd stack that got the password from scripts/init-env.sh stops here (synthwerk#59).
+	if env := getenv("SYNTHWERK_PLATFORM_ENV"); cfg.TestUserPassword != "" && !slices.Contains(testUserEnvs, env) {
+		return Config{}, fmt.Errorf("SYNTHWERK_ZITADEL_TEST_USER_PASSWORD is set but SYNTHWERK_PLATFORM_ENV is %q: test users exist in local and ci only", env)
 	}
 	if len(cfg.StudioRedirectURIs) == 0 {
 		return Config{}, errors.New("SYNTHWERK_ZITADEL_STUDIO_REDIRECT_URIS: want at least one URI")

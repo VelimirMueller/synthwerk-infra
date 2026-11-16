@@ -580,6 +580,39 @@ func TestConfigRejectsWildcardAndRelativeURIs(t *testing.T) {
 	}
 }
 
+func TestConfigRefusesTestUsersOutsideLocalAndCI(t *testing.T) {
+	cfgFor := func(env string) error {
+		_, err := bootstrap.ConfigFromEnv(func(k string) string {
+			switch k {
+			case "SYNTHWERK_PLATFORM_ENV":
+				return env
+			case "SYNTHWERK_ZITADEL_TEST_USER_PASSWORD":
+				return "0123456789abcdef"
+			}
+			return ""
+		})
+		return err
+	}
+	for _, env := range []string{"", "local", "ci"} {
+		if err := cfgFor(env); err != nil {
+			t.Errorf("env %q: %v", env, err)
+		}
+	}
+	for _, env := range []string{"dev", "stg", "prd", "LOCAL"} {
+		if err := cfgFor(env); err == nil {
+			t.Errorf("env %q with a test user password: want an error", env)
+		}
+	}
+	if _, err := bootstrap.ConfigFromEnv(func(k string) string {
+		if k == "SYNTHWERK_PLATFORM_ENV" {
+			return "prd"
+		}
+		return ""
+	}); err != nil {
+		t.Errorf("prd without a test user password: %v", err)
+	}
+}
+
 func TestCheckRoles(t *testing.T) {
 	claims := map[string]any{
 		"urn:zitadel:iam:user:resourceowner:id": "o-1",
