@@ -109,7 +109,7 @@ services:
   # synthwerk#47), pinned by digest.
   pulse:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-pulse:8a6b38858d422cb6c3480d6bbbff88c9cb63901d@sha256:03febd6448bb5ad9f9bc798c6a5fc9ed33e705fbaf08dd9c2df41580698fedf8
+    image: ghcr.io/velimirmueller/synthwerk-pulse:d70e480e701f5dc3c88c4bef9d987617c102b724@sha256:f922be1e696030fc651dadbef0e691a2f94fdb1bf2dee9765e9c013de1162177
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -514,7 +514,7 @@ services:
   # calls of llm, synthwerk#53), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:9880dec37ff899dd29e75718e167562860795af2@sha256:ae080da81425154e359a38aa67d05946e5f28396ab23c6589a5608cbefdf3c2a
+    image: ghcr.io/velimirmueller/synthwerk-identity:48f8904e8f22ed63e12e6351db2857de049400ac@sha256:96c3242500633389a7752c8e1641f870c65a99708f9c3762e66e7bdb0e85b3eb
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -599,7 +599,7 @@ services:
   # synthwerk-widgets#33), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:d02d995c9c9460cff71f1f4dc30e6100407413f0@sha256:ef967241b657661eab3174de697ea625d2940ec47763ac7ca53065238456389d
+    image: ghcr.io/velimirmueller/synthwerk-llm:8e1d7756e00c39a63bf6530f8abe66dbb30900ee@sha256:692d994a0ee66f2a5a1adcec6afd0b3203b2644df2caed2f71dd7f1e69d1501f
     read_only: true
     cap_drop: [ALL]
     environment:

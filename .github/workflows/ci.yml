@@ -119,12 +119,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # synthwerk-studio main 04ed576 (page builder, public site, relay to EVT_STUDIO, leads, health alerts and AI cost, synthwerk#57; live demo and public numbers, synthwerk#47). Bump the SHA by hand.
+      # synthwerk-studio main fd03256 (Nuxt 4.6.4 and CSRF on every path, synthwerk#59; page builder, public site, relay to EVT_STUDIO, leads, health alerts and AI cost, synthwerk#57; live demo and public numbers, synthwerk#47). Bump the SHA by hand.
       - name: Check out synthwerk-studio for the studio profile
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: VelimirMueller/synthwerk-studio
-          ref: 04ed576b54cd8008f7e9db58e03ee9fd13f3a902
+          ref: fd0325667cd303f506c97a62fe324210153649d9
           path: .studio-src
           persist-credentials: false
       - name: Check the shell scripts with bash and shellcheck
