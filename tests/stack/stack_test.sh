@@ -886,6 +886,23 @@ if [[ "$WIDGETS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   expect_status "widgets SQL injection in the query gets 403 (WAF)" 403 "$EDGE$path?v=1%27%20OR%20%271%27=%271"
   cache=$(curl -s -o /dev/null -D - --max-time 10 "$EDGE/widgets/v0.0.0/synthwerk-chat.js" | tr -d '\r' | grep -ci '^cache-control:' || true)
   if [[ "$cache" == 0 ]]; then pass "widgets 404 has no cache header"; else fail "widgets 404 carries a cache header"; fi
+  # The chat frame page (synthwerk-widgets#33): framable from any site, strict CSP, no CORS header.
+  frame="/widgets/$WIDGETS_VERSION/synthwerk-chat-frame.html"
+  if docker compose exec -T widgets test -f "/usr/share/nginx/html$frame" 2>/dev/null; then
+    headers=$(curl -s -o /dev/null -D - --max-time 10 "$EDGE$frame" | tr -d '\r' || true)
+    if grep -qFx "HTTP/1.1 200 OK" <<<"$headers"; then pass "$frame: 200"; else fail "$frame: not 200"; fi
+    if grep -qi '^x-frame-options:' <<<"$headers"; then fail "$frame: X-Frame-Options blocks framing"; else pass "$frame: no X-Frame-Options"; fi
+    csp=$(grep -i '^content-security-policy:' <<<"$headers" || true)
+    if [[ "$csp" == *"frame-ancestors *"* && "$csp" == *"script-src 'self'"* && "$csp" != *unsafe-* ]]; then pass "$frame: strict CSP, frame-ancestors *"; else fail "$frame: CSP '${csp:-none}'"; fi
+    if grep -qi '^access-control-allow-origin:' <<<"$headers"; then fail "$frame: a page needs no CORS header"; else pass "$frame: no CORS header"; fi
+    # A versioned path: the page bytes never change, like the bundles next to it.
+    if grep -qiFx "Cache-Control: public, max-age=31536000, immutable" <<<"$headers"; then pass "$frame: immutable cache"; else fail "$frame: no immutable cache header"; fi
+    expect_status "widgets POST on the frame page: no route" 404 -X POST --data x "$EDGE$frame"
+    bundle=$(curl -s -o /dev/null -D - --max-time 10 "$EDGE$path" | tr -d '\r' | grep -ci '^x-frame-options: deny' || true)
+    if [[ "$bundle" == 1 ]]; then pass "widgets bundles keep X-Frame-Options DENY"; else fail "widgets bundles lost X-Frame-Options DENY"; fi
+  else
+    echo "skip: the widget host image has no chat frame page (synthwerk-widgets#33, from v0.4.0)"
+  fi
 else
   fail "widgets: no version directory in the image: '${WIDGETS_VERSION:-none}'"
 fi

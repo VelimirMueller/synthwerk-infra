@@ -11,6 +11,12 @@ http:
       chain:
         middlewares: [edge-ratelimit, edge-waf, edge-headers]
 
+    # Same chain with headers that allow framing, for the chat frame page only
+    # (synthwerk-widgets#33). Its own CSP (frame-ancestors *) comes from the widget host.
+    edge-secure-frame:
+      chain:
+        middlewares: [edge-ratelimit, edge-body-limit, edge-waf, edge-headers-frame]
+
     # Per client IP: 50 requests per second on average, bursts up to 100.
     edge-ratelimit:
       rateLimit:
@@ -57,4 +63,10 @@ http:
       headers:
         contentTypeNosniff: true
         frameDeny: true
+        referrerPolicy: no-referrer
+
+    # edge-headers without frameDeny (X-Frame-Options), for the chat frame page.
+    edge-headers-frame:
+      headers:
+        contentTypeNosniff: true
         referrerPolicy: no-referrer

@@ -87,6 +87,15 @@ http:
       middlewares: [edge-secure]
       service: widgets
 
+    # The chat frame page of <synthwerk-chat mode="iframe"> (synthwerk-widgets#33). Customer
+    # sites frame it, so this router uses the chain without frameDeny. The widget host sends
+    # its own CSP with frame-ancestors * and no inline code. GET and HEAD only, WAF on.
+    widgets-frame:
+      rule: PathRegexp(`^/widgets/v[0-9]+\.[0-9]+\.[0-9]+/synthwerk-chat-frame\.html$`) && (Method(`GET`) || Method(`HEAD`))
+      entryPoints: [web]
+      middlewares: [edge-secure-frame]
+      service: widgets
+
     # Zitadel on its own host (D-42). The rule is a template: the host comes from
     # SYNTHWERK_ZITADEL_EXTERNAL_DOMAIN on the edge container.
     # Templating: the Traefik file provider renders Go templates (with Sprig) in

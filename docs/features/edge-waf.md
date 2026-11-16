@@ -74,3 +74,4 @@ updated: 2026-11-16
 | 2026-10-28 | Exclusions for Zitadel login UI v2 and the OIDC redirect arguments (synthwerk#28). |
 | 2026-10-29 | The collector truncates client IPs in spans before export (#3). |
 | 2026-11-16 | Router `widgets`: GET and HEAD only on the embed bundle paths, chain `edge-secure`, no prefix strip, no `edge-cors`. Other methods match no router: 404 (synthwerk-widgets#32). |
+| 2026-11-16 | Router `widgets-frame` for the chat frame page `/widgets/v<X.Y.Z>/synthwerk-chat-frame.html`: GET and HEAD, chain `edge-secure-frame` (headers without `frameDeny`). The widget host sends the CSP with `frame-ancestors *` (synthwerk-widgets#33). |
