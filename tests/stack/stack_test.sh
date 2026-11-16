@@ -1196,8 +1196,14 @@ if [[ ${#pulse_auth[@]} -gt 0 ]]; then
     else
       fail "the linked trace '${trace:-none}' does not open in Grafana"
     fi
-    member_alerts=$(curl -s --max-time 10 -H "Authorization: Bearer $(tests/stack/issuer.sh mint stack-admin stack-org admin)" "$EDGE/pulse/v1/alerts" || true)
-    if grep -qE '"trace_(id|url)": ?"' <<<"$member_alerts"; then fail "pulse alerts: an org admin gets trace fields"; else pass "pulse alerts: an org admin gets no trace fields"; fi
+    admin_alerts=$(curl -s --max-time 10 -H "Authorization: Bearer $(tests/stack/issuer.sh mint stack-admin stack-org admin)" "$EDGE/pulse/v1/alerts" || true)
+    if ! grep -qE '"id": ?"service_errors:stub"' <<<"$admin_alerts"; then
+      fail "pulse alerts: an org admin does not see service_errors:stub"
+    elif grep -qE '"trace_(id|url)": ?"' <<<"$admin_alerts"; then
+      fail "pulse alerts: an org admin gets trace fields"
+    else
+      pass "pulse alerts: an org admin sees service_errors:stub without trace fields"
+    fi
     if curl -s --max-time 10 "${pulse_auth[@]}" "$EDGE/pulse/v1/metrics" | grep -qE '"ai_cost": ?\{"currency": ?"USD"'; then
       pass "pulse metrics: AI cost per day in USD (price file loaded)"
     else
