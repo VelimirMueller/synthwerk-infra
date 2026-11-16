@@ -1,5 +1,5 @@
 # Synthwerk local stack: edge, WAF, bus, database, telemetry, pulse, Zitadel,
-# identity, llm and the mascot; vision and studio with a profile.
+# identity, llm, the mascot and the widget host; vision and studio with a profile.
 #
 #   scripts/init-env.sh            # once: write .env with generated dev passwords
 #   docker compose up --wait       # start and wait until every service is healthy
@@ -10,7 +10,8 @@
 #   docker compose --profile studio up --build --wait   # also build and start studio
 #
 # Every image is pinned by tag and digest. Renovate bumps both. Studio has no
-# published image yet: its profile builds it from source (studio/Dockerfile).
+# published image yet: its profile builds it from source (studio/Dockerfile). The widget
+# host is built from a pinned synthwerk-widgets commit until its first release.
 name: synthwerk
 
 x-hardening: &hardening
@@ -657,6 +658,31 @@ services:
       # /readyz: 200 once the model and the index are loaded, 503 before.
       start_period: 60s
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+
+  # Widget host (synthwerk-widgets#32): unprivileged nginx serves the embed bundles under
+  # /widgets/v<X.Y.Z>/ with the immutable cache and cross-origin headers; edge route "widgets".
+  # Static files only: no database, no bus, no telemetry, no egress.
+  # Until the first release: built from synthwerk-widgets 4667cc3 (PR #47) with SOURCE=source,
+  # so the image builds the bundles from that commit and serves them as v0.3.0. Swap to
+  # ghcr.io/velimirmueller/synthwerk-widgets:<sha>@sha256:<digest> from deploy.yml once
+  # releases.json lists v0.3.0; that image serves only released, hash-checked bundles.
+  widgets:
+    <<: *hardening
+    build:
+      context: https://github.com/VelimirMueller/synthwerk-widgets.git#4667cc321d6c276ef958092b45e434195cbe1f39
+      args:
+        SOURCE: source
+        COMMIT: 4667cc321d6c276ef958092b45e434195cbe1f39
+    image: synthwerk-widgets:local
+    read_only: true
+    cap_drop: [ALL]
+    # nginx writes its pid and temp files here.
+    tmpfs: [/tmp]
+    mem_limit: 64m
+    networks: [app]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
 
   # One-shot: the service token of the vision label admin (synthwerk#44). Made once per
   # volume at the first start, never in git. .token (root) holds the value; a missing copy

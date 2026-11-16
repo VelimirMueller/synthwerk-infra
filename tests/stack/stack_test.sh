@@ -851,6 +851,36 @@ d = json.load(sys.stdin)
 print(",".join(s for a in d.get("account_details", []) for st in a.get("stream_detail", [])
                if st["name"] == "EVT_STUDIO" for s in st["config"]["subjects"]))' <<<"$cfg" 2>/dev/null || true)
 if [[ "$subjects" == 'evt.studio.>' ]]; then pass "EVT_STUDIO keeps the subjects evt.studio.>"; else fail "EVT_STUDIO subjects: '${subjects:-none}'"; fi
+echo "# widgets: the embed bundles on the edge, immutable and cross-origin (synthwerk-widgets#32)"
+# The widget host answers with these headers; the edge keeps them and adds its own.
+WIDGETS_VERSION=$(docker compose exec -T widgets sh -c 'ls /usr/share/nginx/html/widgets' 2>/dev/null | sort -V | tail -n 1 | tr -d '\r' || true)
+if [[ "$WIDGETS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  for file in synthwerk-chat.js synthwerk-vision.js; do
+    path="/widgets/$WIDGETS_VERSION/$file"
+    headers=$(curl -s -o /dev/null -D - --max-time 10 -H 'Origin: https://shop.stack.test' "$EDGE$path" | tr -d '\r' || true)
+    # want <header>: <value> must be in the answer exactly once.
+    for want in "HTTP/1.1 200 OK" "Content-Type: text/javascript" "Cache-Control: public, max-age=31536000, immutable" \
+      "Access-Control-Allow-Origin: *" "Cross-Origin-Resource-Policy: cross-origin" "X-Content-Type-Options: nosniff"; do
+      n=$(grep -ciFx "$want" <<<"$headers" || true)
+      if [[ "$n" == 1 ]]; then pass "$path: $want"; else fail "$path: '$want' $n times"; fi
+    done
+    # The bytes through the edge are the bytes in the image (no edge rewrite).
+    edge_sum=$(curl -s --max-time 10 "$EDGE$path" | openssl dgst -sha384 -r | cut -d' ' -f1 || true)
+    file_sum=$(docker compose exec -T widgets cat "/usr/share/nginx/html$path" 2>/dev/null | openssl dgst -sha384 -r | cut -d' ' -f1 || true)
+    if [[ -n "$file_sum" && "$edge_sum" == "$file_sum" ]]; then pass "$path: same bytes through the edge"; else fail "$path: edge bytes differ from the image"; fi
+  done
+  path="/widgets/$WIDGETS_VERSION/synthwerk-chat.js"
+  expect_status "widgets HEAD on a bundle" 200 -I "$EDGE$path"
+  expect_status "widgets POST on a bundle: no route" 404 -X POST --data x "$EDGE$path"
+  expect_status "widgets OPTIONS on a bundle: no route" 404 -X OPTIONS "$EDGE$path"
+  expect_status "widgets unknown version: 404" 404 "$EDGE/widgets/v0.0.0/synthwerk-chat.js"
+  expect_status "widgets health check is not on the edge" 404 "$EDGE/widgets/healthz"
+  expect_status "widgets SQL injection in the query gets 403 (WAF)" 403 "$EDGE$path?v=1%27%20OR%20%271%27=%271"
+  cache=$(curl -s -o /dev/null -D - --max-time 10 "$EDGE/widgets/v0.0.0/synthwerk-chat.js" | tr -d '\r' | grep -ci '^cache-control:' || true)
+  if [[ "$cache" == 0 ]]; then pass "widgets 404 has no cache header"; else fail "widgets 404 carries a cache header"; fi
+else
+  fail "widgets: no version directory in the image: '${WIDGETS_VERSION:-none}'"
+fi
 
 echo "# mascot: public answers with sources, per-client rate limit, no egress (synthwerk#48)"
 MASCOT="$EDGE/mascot"

@@ -50,3 +50,7 @@ targets:
     kind: http
     url: http://llm:8080/readyz
     interval: 5s
+  - name: widgets
+    kind: http
+    url: http://widgets:8080/healthz
+    interval: 5s
