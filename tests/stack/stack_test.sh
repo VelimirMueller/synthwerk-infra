@@ -853,7 +853,8 @@ print(",".join(s for a in d.get("account_details", []) for st in a.get("stream_d
 if [[ "$subjects" == 'evt.studio.>' ]]; then pass "EVT_STUDIO keeps the subjects evt.studio.>"; else fail "EVT_STUDIO subjects: '${subjects:-none}'"; fi
 echo "# widgets: the embed bundles on the edge, immutable and cross-origin (synthwerk-widgets#32)"
 # The widget host answers with these headers; the edge keeps them and adds its own.
-WIDGETS_VERSION=$(docker compose exec -T widgets sh -c 'ls /usr/share/nginx/html/widgets' 2>/dev/null | sort -V | tail -n 1 | tr -d '\r' || true)
+# The newest version directory in the image; other entries are ignored.
+WIDGETS_VERSION=$(docker compose exec -T widgets sh -c 'ls /usr/share/nginx/html/widgets' 2>/dev/null | tr -d '\r' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
 if [[ "$WIDGETS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   for file in synthwerk-chat.js synthwerk-vision.js; do
     path="/widgets/$WIDGETS_VERSION/$file"
