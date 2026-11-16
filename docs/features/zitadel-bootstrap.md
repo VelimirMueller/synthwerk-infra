@@ -121,3 +121,4 @@ updated: 2026-10-30
 | 2026-10-30 | Project id file for identity; grant deactivate and reactivate events go to the identity hook (synthwerk#37). |
 | 2026-10-30 | Subcommand `delete-check`: account delete with real Zitadel tokens and the ID token step-up (synthwerk#41). |
 | 2026-10-30 | Subcommand `builder-check`: studio sign-in through its own code flow and the page builder with a session (synthwerk#107). |
+| 2026-10-30 | `builder-check` also creates a page, publishes it twice and rolls it back as owner.demo with the session CSRF token, and logs the page id (synthwerk#106). |
