@@ -1123,6 +1123,21 @@ if tests/stack/issuer.sh active; then
     if ((services > 0)); then pass "pulse metrics as operator: $services edge services from Prometheus"; else fail "pulse metrics as operator: no edge service from Prometheus within 60 s"; fi
   fi
 fi
+# Public numbers (synthwerk#47): no token, totals only, public cache of 60 s.
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$EDGE/pulse/v1/public-stats" || true)
+if [[ "$code" == 404 || "$code" == 401 ]]; then
+  echo "skip: the pulse image has no public stats route (synthwerk#47)"
+else
+  headers=$(curl -s -D - -o "$stream_log.stats" --max-time 10 "$EDGE/pulse/v1/public-stats" | tr -d '\r' || true)
+  if grep -qFx "HTTP/1.1 200 OK" <<<"$headers"; then pass "pulse public stats without a token: 200"; else fail "pulse public stats without a token: not 200"; fi
+  if grep -qiFx "Cache-Control: public, max-age=60" <<<"$headers"; then pass "pulse public stats: public cache of 60 s"; else fail "pulse public stats: no public cache header"; fi
+  if grep -qE '"uptime_ratio":' "$stream_log.stats" && grep -qE '"answered_chats":' "$stream_log.stats" && ! grep -qE '"org' "$stream_log.stats"; then
+    pass "pulse public stats: uptime and answered chats, no org field"
+  else
+    fail "pulse public stats: body '$(head -c 200 "$stream_log.stats")'"
+  fi
+  rm -f "$stream_log.stats"
+fi
 stream_log=$(mktemp)
 curl -sN --max-time 180 "${pulse_auth[@]}" "$EDGE/pulse/v1/health/stream" >"$stream_log" 2>/dev/null &
 stream_pid=$!
@@ -1135,6 +1150,8 @@ for svc in edge waf bus database telemetry stub zitadel zitadel-login identity l
 done
 docker compose stop stub >/dev/null 2>&1
 start=$SECONDS
+# 5xx answers at the edge for the pulse alert service_errors:stub below (synthwerk#57).
+curl -s -o /dev/null --max-time 5 "$EDGE/stub/?alert=[1-5]" || true
 if wait_for '"target":"stub","from":"ok","status":"down"' 30; then
   pass "stopped stub is down on the stream after $((SECONDS - start)) s (limit 30 s)"
 else
@@ -1150,6 +1167,50 @@ else
 fi
 kill "$stream_pid" 2>/dev/null || true
 stream_pid=""
+
+# Alerts with trace links and AI cost (synthwerk#57). The stub was down above, so pulse raised
+# target_down:stub. The 5xx answers of the edge while the stub was down raise
+# service_errors:stub (5 min window) with the Tempo trace and the Grafana link of the stack.
+if [[ ${#pulse_auth[@]} -gt 0 ]]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${pulse_auth[@]}" "$EDGE/pulse/v1/alerts" || true)
+  if [[ "$code" == 404 ]]; then
+    echo "skip: the pulse image has no alerts route (synthwerk#57)"
+  else
+    expect_status "pulse alerts without a token: 401" 401 "$EDGE/pulse/v1/alerts"
+    expect_status "pulse alerts as a member: 403" 403 -H "Authorization: Bearer $(tests/stack/issuer.sh mint stack-member stack-platform member)" "$EDGE/pulse/v1/alerts"
+    alerts=""
+    for _ in $(seq 1 45); do
+      alerts=$(curl -s --max-time 10 "${pulse_auth[@]}" "$EDGE/pulse/v1/alerts" || true)
+      grep -qE '"id": ?"service_errors:stub"[^}]*"trace_url": ?"http://localhost:[0-9]+/explore\?[^"]*%22[0-9a-f]{32}%22' <<<"$alerts" && break
+      sleep 2
+    done
+    if grep -qE '"id": ?"service_errors:stub"' <<<"$alerts"; then pass "pulse alert service_errors:stub after the 5xx answers"; else fail "pulse: no service_errors:stub alert within 90 s"; fi
+    if grep -qE '"id": ?"service_errors:stub"[^}]*"trace_url": ?"http://localhost:[0-9]+/explore\?[^"]*%22[0-9a-f]{32}%22' <<<"$alerts"; then
+      pass "pulse alert service_errors:stub links its Tempo trace in Grafana"
+    else
+      fail "pulse alert service_errors:stub: no Grafana trace link within 90 s"
+    fi
+    trace=$(grep -oE '"id": ?"service_errors:stub"[^}]*"trace_id": ?"[0-9a-f]{32}"' <<<"$alerts" | grep -oE '[0-9a-f]{32}' | tail -n 1 || true)
+    if [[ -n "$trace" ]] && curl -sf --max-time 10 "http://127.0.0.1:$(setting SYNTHWERK_TELEMETRY_UI_PORT 3000)/api/datasources/proxy/uid/tempo/api/traces/$trace" -o /dev/null; then
+      pass "the linked trace opens in Grafana (data source uid tempo)"
+    else
+      fail "the linked trace '${trace:-none}' does not open in Grafana"
+    fi
+    admin_alerts=$(curl -s --max-time 10 -H "Authorization: Bearer $(tests/stack/issuer.sh mint stack-admin stack-org admin)" "$EDGE/pulse/v1/alerts" || true)
+    if ! grep -qE '"id": ?"service_errors:stub"' <<<"$admin_alerts"; then
+      fail "pulse alerts: an org admin does not see service_errors:stub"
+    elif grep -qE '"trace_(id|url)": ?"' <<<"$admin_alerts"; then
+      fail "pulse alerts: an org admin gets trace fields"
+    else
+      pass "pulse alerts: an org admin sees service_errors:stub without trace fields"
+    fi
+    if curl -s --max-time 10 "${pulse_auth[@]}" "$EDGE/pulse/v1/metrics" | grep -qE '"ai_cost": ?\{"currency": ?"USD"'; then
+      pass "pulse metrics: AI cost per day in USD (price file loaded)"
+    else
+      fail "pulse metrics: no ai_cost in USD"
+    fi
+  fi
+fi
 
 echo "# the edge fails closed when the WAF is down"
 docker compose stop waf >/dev/null 2>&1
