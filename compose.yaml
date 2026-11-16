@@ -615,6 +615,9 @@ services:
       SYNTHWERK_LLM_WIDGET_ISSUER: ${SYNTHWERK_LLM_WIDGET_ISSUER:-${SYNTHWERK_IDENTITY_WIDGET_ISSUER:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}/identity}}
       SYNTHWERK_LLM_WIDGET_JWKS_URL: ${SYNTHWERK_LLM_WIDGET_JWKS_URL:-http://identity:8080/.well-known/jwks.json}
       SYNTHWERK_LLM_WIDGET_AUDIENCE: ${SYNTHWERK_LLM_WIDGET_AUDIENCE:-synthwerk-api}
+      # The chat iframe on the widget host (synthwerk-widgets#33) sends the edge origin, not the
+      # host page origin of the token: llm accepts that origin too. Older llm images ignore it.
+      SYNTHWERK_LLM_WIDGET_FRAME_ORIGINS: ${SYNTHWERK_LLM_WIDGET_FRAME_ORIGINS:-http://localhost:${SYNTHWERK_EDGE_HTTP_PORT:-8080}}
       # AI settings (synthwerk#39): llm checks membership and plan limit with identity.
       # Widget CORS: llm asks identity which origins have an app (cached).
       SYNTHWERK_LLM_IDENTITY_URL: http://identity:8080
