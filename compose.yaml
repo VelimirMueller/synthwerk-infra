@@ -104,11 +104,12 @@ services:
 
   # Pulse: checks every part of this stack and streams the status over SSE
   # (GET /pulse/v1/health/stream on the edge). Targets: compose/pulse/targets.yaml.
-  # Image from synthwerk-pulse develop 984d77e (deploy.yml, token check + metrics, synthwerk#40),
-  # pinned by digest.
+  # Image from synthwerk-pulse develop 8a6b388 (deploy.yml; token check + metrics, synthwerk#40;
+  # alerts with trace links and AI cost per day, synthwerk#57; public stats without a token,
+  # synthwerk#47), pinned by digest.
   pulse:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-pulse:984d77e14e759566d369f31d09036b2be5066e2a@sha256:6e37c2b022310bb5860c3f96d4064eea7589918490482161616e237f448a215f
+    image: ghcr.io/velimirmueller/synthwerk-pulse:8a6b38858d422cb6c3480d6bbbff88c9cb63901d@sha256:03febd6448bb5ad9f9bc798c6a5fc9ed33e705fbaf08dd9c2df41580698fedf8
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -127,8 +128,15 @@ services:
       SYNTHWERK_PULSE_PLATFORM_ORG_ID: ${SYNTHWERK_PULSE_PLATFORM_ORG_ID:-}
       # Edge rates, error share and p95 per service (traefik_service_* in Prometheus).
       SYNTHWERK_PULSE_PROMETHEUS_URL: http://telemetry:9090
+      # Alerts (synthwerk#57): Tempo in telemetry finds the trace of an edge 5xx. Operators get
+      # a link to it in Grafana on the host (data source uid "tempo"); {trace_id} is filled in.
+      SYNTHWERK_PULSE_TEMPO_URL: http://telemetry:3200
+      SYNTHWERK_PULSE_TRACE_URL_TEMPLATE: http://localhost:${SYNTHWERK_TELEMETRY_UI_PORT:-3000}/explore?schemaVersion=1&orgId=1&panes=%7B%22t%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22datasource%22%3A%7B%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22%7D%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22{trace_id}%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-1h%22%2C%22to%22%3A%22now%22%7D%7D%7D
+      # AI cost per day: local providers (ollama, fake) cost 0 (compose/pulse/prices.yaml).
+      SYNTHWERK_PULSE_AI_PRICES_FILE: /etc/pulse/prices.yaml
     volumes:
       - ./compose/pulse/targets.yaml:/etc/pulse/targets.yaml:ro
+      - ./compose/pulse/prices.yaml:/etc/pulse/prices.yaml:ro
     networks: [app, data]
     depends_on:
       bus:
@@ -498,14 +506,15 @@ services:
     network_mode: none
 
   # synthwerk-identity: orgs, roles, entitlements. Own role and schema "identity".
-  # Image from synthwerk-identity develop e0a9351 (deploy.yml; MFA gate, widget tokens, audit of
+  # Image from synthwerk-identity develop 9880dec (deploy.yml; MFA gate, widget tokens, audit of
   # llm AI settings and of the studio page events on EVT_STUDIO (synthwerk#106), project id
   # file and grant status events, account delete with the ID token step-up, synthwerk#41,
   # internal widget origin lookup for llm, readable widget token refusal and bidi-free greeting,
-  # synthwerk-widgets#41, NATS replies on _INBOX_identity), pinned by digest.
+  # synthwerk-widgets#41, NATS replies on _INBOX_identity, audit list of the admin AI tool
+  # calls of llm, synthwerk#53), pinned by digest.
   identity:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-identity:e0a9351e497e5c5de9047c4a9a6022dc743ce690@sha256:f300770f0f0adb6143e8bf4143a132a49e6602e13a1a38c9081b4f43a54d03aa
+    image: ghcr.io/velimirmueller/synthwerk-identity:9880dec37ff899dd29e75718e167562860795af2@sha256:ae080da81425154e359a38aa67d05946e5f28396ab23c6589a5608cbefdf3c2a
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -582,13 +591,15 @@ services:
       test: ["CMD", "/identity", "healthcheck"]
 
   # synthwerk-llm: chat gateway, streams answers over SSE. Own role and schema "llm".
-  # Image from synthwerk-llm develop 0b560c1 (deploy.yml; widget tokens of identity on the
+  # Image from synthwerk-llm develop d02d995 (deploy.yml; widget tokens of identity on the
   # chat routes, synthwerk#30; CORS per app origin on the widget chat routes, at most 8
   # origin lookups in flight; fallback provider chain, synthwerk#56, off while
-  # SYNTHWERK_LLM_FALLBACKS is unset), pinned by digest.
+  # SYNTHWERK_LLM_FALLBACKS is unset; list of the own conversations, synthwerk#54; read-only
+  # AI tools, synthwerk#53, off while SYNTHWERK_LLM_TOOLS is unset; widget frame origins,
+  # synthwerk-widgets#33), pinned by digest.
   llm:
     <<: *hardening
-    image: ghcr.io/velimirmueller/synthwerk-llm:0b560c1e398b5395f4791b309aceb07bf7cd220a@sha256:8fb3235d72658e05223d7dc4ab5c9dff4a67e493e260ec0e277ad7ae49d81aba
+    image: ghcr.io/velimirmueller/synthwerk-llm:d02d995c9c9460cff71f1f4dc30e6100407413f0@sha256:ef967241b657661eab3174de697ea625d2940ec47763ac7ca53065238456389d
     read_only: true
     cap_drop: [ALL]
     environment:
@@ -667,8 +678,9 @@ services:
   # Static files only: no database, no bus, no telemetry, no egress.
   widgets:
     <<: *hardening
-    # synthwerk-widgets v0.3.0 (releases.json), published by deploy.yml from develop.
-    image: ghcr.io/velimirmueller/synthwerk-widgets:ef53c2d2944a3ab788b9e27aa8041fdb33e82560@sha256:a6b9ee9ee2460d50775ab04a1af87ef8ac1a5d9d8a0692a6323cabb6a608adef
+    # synthwerk-widgets v0.3.0 and v0.4.0 (releases.json; v0.4.0 adds the chat frame page,
+    # synthwerk-widgets#33), published by deploy.yml from develop.
+    image: ghcr.io/velimirmueller/synthwerk-widgets:5c9e4699cdf8bf3463d05938af7abd7141bf7cc4@sha256:8d9967ffb095c37a93de96b723ae9dadb94777d1a0f8146a458027efff0d001a
     read_only: true
     cap_drop: [ALL]
     # nginx writes its pid and temp files here.
@@ -893,6 +905,11 @@ services:
       # origin is where the form posts from and where the confirm link points.
       NUXT_SITE_ORG_ID: ${SYNTHWERK_STUDIO_SITE_ORG_ID:-}
       NUXT_SITE_ORIGIN: ${SYNTHWERK_STUDIO_SITE_ORIGIN:-http://localhost:3001}
+      # Live demo of the site (synthwerk#47): the demo app (UUID) in the site org; it must allow
+      # NUXT_SITE_ORIGIN. Empty = the image demo answers 503 demo_not_configured; the chat demo
+      # needs no app. The demo calls llm, vision and identity with the URLs above; the public
+      # numbers (/api/site/stats) come from pulse. The NUXT_SITE_DEMO_* limits keep their defaults.
+      NUXT_SITE_DEMO_APP_ID: ${SYNTHWERK_STUDIO_SITE_DEMO_APP_ID:-}
       # Lead confirm mails (synthwerk#105). Local and ci: Mailpit over SMTP (D-49). dev and
       # prd: resend with the API key in a mounted file (NUXT_MAIL_RESEND_API_KEY_FILE),
       # never in an env file.
