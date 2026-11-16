@@ -198,3 +198,4 @@ updated: 2026-11-16
 | 2026-11-16 | Widget host `widgets` behind the edge: route `widgets` for GET and HEAD on the chat and vision bundles under `/widgets/v<X.Y.Z>/`, pulse target `widgets`. Image v0.3.0 pinned by digest. Stack test: the five host headers once each, same bytes through the edge, POST and OPTIONS 404, WAF 403 (synthwerk-widgets#32). |
 | 2026-11-16 | NATS user `identity` may create, read, pull and ack its new durable `identity-llm-toolcalls` on `EVT_LLM`. It copies the admin AI tool calls into the audit list (synthwerk#53). |
 | 2026-11-16 | Chat frame page of the widgets (synthwerk-widgets#33): router `widgets-frame` without `frameDeny`, llm `SYNTHWERK_LLM_WIDGET_FRAME_ORIGINS` = edge origin. Stack test checks the frame headers; it skips them for a widget image without the page. |
+| 2026-11-16 | WAF and `zitadel-bootstrap` images build on Go 1.27.4. This closes the Go server advisories from the security review (synthwerk#59). |
